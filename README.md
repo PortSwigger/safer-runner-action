@@ -212,3 +212,4 @@ cat /var/log/safer-runner/main-sudo.log     # Main action sudo commands
 ## License
 
 This action is provided as-is for defensive security purposes.
+
