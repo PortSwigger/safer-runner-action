@@ -214,7 +214,7 @@ export function generateConfigurationAdvice(dnsResolutions: DnsResolution[], sud
 
   // Generate unified configuration
   advice += '```yaml\n';
-  advice += `- uses: portswigger-tim/safer-runner-action@v1\n`;
+  advice += `- uses: PortSwigger/safer-runner-action@v1\n`;
   advice += `  with:\n`;
   advice += `    mode: enforce\n`;
 

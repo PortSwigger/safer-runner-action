@@ -352,7 +352,7 @@ describe('Report Formatter', () => {
 
       const result = generateConfigurationAdvice(resolutions);
 
-      expect(result).toContain('portswigger-tim/safer-runner-action@v1');
+      expect(result).toContain('PortSwigger/safer-runner-action@v1');
     });
 
     it('should suggest disable-sudo when no sudo commands are used', () => {

@@ -204,7 +204,7 @@ async function generateJobSummary(
     summary += `---\n\n`;
   }
 
-  summary += `*Secured by [Safer Runner Action](https://github.com/portswigger-tim/safer-runner-action)*\n`;
+  summary += `*Secured by [Safer Runner Action](https://github.com/PortSwigger/safer-runner-action)*\n`;
 
   await core.summary.addRaw(summary).write();
 }

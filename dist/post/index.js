@@ -204,7 +204,7 @@ function generateConfigurationAdvice(dnsResolutions, sudoCommands) {
     }
     // Generate unified configuration
     advice += '```yaml\n';
-    advice += `- uses: portswigger-tim/safer-runner-action@v1\n`;
+    advice += `- uses: PortSwigger/safer-runner-action@v1\n`;
     advice += `  with:\n`;
     advice += `    mode: enforce\n`;
     // Add allowed-domains if we have them
@@ -1196,7 +1196,7 @@ async function generateJobSummary(connections, dnsResolutions, sudoCommands, pre
         summary += (0, report_formatter_1.generateConfigurationAdvice)(dnsResolutions, sudoCommands);
         summary += `---\n\n`;
     }
-    summary += `*Secured by [Safer Runner Action](https://github.com/portswigger-tim/safer-runner-action)*\n`;
+    summary += `*Secured by [Safer Runner Action](https://github.com/PortSwigger/safer-runner-action)*\n`;
     await core.summary.addRaw(summary).write();
 }
 run();
@@ -1473,7 +1473,7 @@ function generateSudoConfigAdvice(commands) {
     let advice = `### Sudo Configuration\n\n`;
     advice += `Based on observed sudo usage, you can restrict sudo access with this configuration:\n\n`;
     advice += `\`\`\`yaml\n`;
-    advice += `- uses: portswigger-tim/safer-runner-action@v1\n`;
+    advice += `- uses: PortSwigger/safer-runner-action@v1\n`;
     advice += `  with:\n`;
     advice += `    sudo-config: |\n`;
     // Indent each line of the sudoers config
