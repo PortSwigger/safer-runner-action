@@ -79,11 +79,21 @@ async function run(): Promise<void> {
     core.info('Configuring sudo logging for pre-hook monitoring...');
     await setupSudoLogging('/var/log/safer-runner/pre-sudo.log');
 
+    core.saveState('pre-setup-completed', 'true');
+
     core.info('✅ Pre-action: Security monitoring active (analyze mode)');
     core.info('   Main action will apply user configuration...');
   } catch (error) {
-    // Don't fail the workflow if pre-setup fails - log warning and continue
-    core.warning(`Pre-action setup encountered an error: ${error}`);
+    // Deliberately non-fatal - the main action gets a second chance at full setup. But this
+    // must be impossible to miss: if the calling workflow skips the main Safer Runner step,
+    // nothing else applies protection and the job runs with unrestricted network access.
+    const message = error instanceof Error ? error.message : String(error);
+
+    core.saveState('pre-setup-error', message);
+    core.error(
+      `Safer Runner pre-hook could not establish security monitoring: ${message}. ` +
+        'If the main Safer Runner step does not run, this job has NO network protection.'
+    );
     core.warning('Main action will attempt full setup...');
   }
 }

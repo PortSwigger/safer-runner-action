@@ -24,6 +24,7 @@ exports.formatIpAddresses = formatIpAddresses;
 exports.formatCnameChain = formatCnameChain;
 exports.getStatusIcon = getStatusIcon;
 exports.getDnsStatusIcon = getDnsStatusIcon;
+exports.generateSecurityStatusBanner = generateSecurityStatusBanner;
 const github_parser_1 = __nccwpck_require__(9170);
 const sudo_parser_1 = __nccwpck_require__(7516);
 const sudo_1 = __nccwpck_require__(1279);
@@ -340,6 +341,37 @@ function getDnsStatusIcon(status) {
         default:
             return '❓';
     }
+}
+/**
+ * Banner stating whether the job was actually protected.
+ *
+ * Setup failures are deliberately non-fatal, which previously meant a job could run with no
+ * network protection at all while the only trace was a `core.warning()` in the log. This makes
+ * that state impossible to miss in the job summary.
+ */
+function generateSecurityStatusBanner(status) {
+    const { preSetupCompleted, mainSetupCompleted, mode, preSetupError } = status;
+    if (mainSetupCompleted) {
+        return '';
+    }
+    if (!preSetupCompleted) {
+        let banner = `> [!CAUTION]\n`;
+        banner += `> ### 🚨 No network protection was applied to this job\n`;
+        banner += `> Safer Runner could not establish its security controls, so this job ran with **unrestricted network access**. `;
+        banner += `Traffic was neither filtered nor recorded, and the report below is therefore incomplete.\n`;
+        if (preSetupError) {
+            banner += `>\n> Cause: \`${preSetupError}\`\n`;
+        }
+        banner += `>\n> Re-running the job usually clears a transient package-mirror failure. `;
+        banner += `If it persists, the runner cannot reach the Ubuntu apt mirrors.\n\n`;
+        return banner;
+    }
+    let banner = `> [!WARNING]\n`;
+    banner += `> ### ⚠️ Configured mode \`${mode}\` was not applied\n`;
+    banner += `> The pre-hook established analyze-mode monitoring, but the main Safer Runner step did not run, `;
+    banner += `so your \`mode: ${mode}\` configuration was never applied and nothing was blocked. `;
+    banner += `Check whether an \`if:\` condition skipped the step.\n\n`;
+    return banner;
 }
 
 
@@ -1031,6 +1063,21 @@ const report_formatter_1 = __nccwpck_require__(5601);
 async function run() {
     try {
         core.info('🔍 Analyzing network access logs...');
+        // Whether protection was actually established. Setup failures are non-fatal, so without
+        // this the summary would report on a job that ran with no protection as if all were well.
+        const securityStatus = {
+            preSetupCompleted: core.getState('pre-setup-completed') === 'true',
+            mainSetupCompleted: core.getState('main-setup-completed') === 'true',
+            mode: core.getInput('mode') || 'analyze',
+            preSetupError: core.getState('pre-setup-error') || undefined
+        };
+        if (!securityStatus.preSetupCompleted && !securityStatus.mainSetupCompleted) {
+            core.error('🚨 Safer Runner applied NO network protection to this job. ' +
+                'Traffic was neither filtered nor recorded. See the job summary for details.');
+        }
+        else if (!securityStatus.mainSetupCompleted) {
+            core.warning(`Safer Runner ran in pre-hook monitoring only - the configured mode '${securityStatus.mode}' was never applied.`);
+        }
         // Wait for logs to be written
         await new Promise(resolve => setTimeout(resolve, 2000));
         // Parse main action logs
@@ -1080,7 +1127,7 @@ async function run() {
             core.setFailed('🚨 Workflow failed due to security configuration tampering detection!');
             return; // Exit early - the validation report will still be in the logs above
         }
-        await generateJobSummary(connections, dnsResolutions, sudoCommands, preHookConnections, preHookDnsResolutions, preHookSudoCommands, validationReport);
+        await generateJobSummary(connections, dnsResolutions, sudoCommands, preHookConnections, preHookDnsResolutions, preHookSudoCommands, validationReport, securityStatus);
         core.info('✅ Network access summary generated');
     }
     catch (error) {
@@ -1107,11 +1154,14 @@ function generatePreHookAnalysis(preHookConnections, preHookDnsResolutions, preH
     report += `</details>\n\n`;
     return report;
 }
-async function generateJobSummary(connections, dnsResolutions, sudoCommands, preHookConnections, preHookDnsResolutions, preHookSudoCommands, validationReport) {
+async function generateJobSummary(connections, dnsResolutions, sudoCommands, preHookConnections, preHookDnsResolutions, preHookSudoCommands, validationReport, securityStatus) {
     const mode = core.getInput('mode') || 'analyze';
     const blockRiskySubdomains = core.getBooleanInput('block-risky-github-subdomains');
     const jobName = process.env.GITHUB_JOB || 'unknown';
     let summary = `# Safer Runner Security Report\n\n`;
+    // Placed above everything else: if protection was not applied, that is the only thing
+    // about this report a reader needs to see first.
+    summary += (0, report_formatter_1.generateSecurityStatusBanner)(securityStatus);
     const modeIcon = mode === 'enforce' ? '🔒' : '📊';
     summary += `**Job:** ${jobName}\n`;
     summary += `**Mode:** ${modeIcon} ${mode.toUpperCase()}\n`;

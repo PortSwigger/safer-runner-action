@@ -7,12 +7,34 @@ import {
   generateNetworkConnectionDetails,
   generateDnsTable,
   generateDnsDetails,
-  generateConfigurationAdvice
+  generateConfigurationAdvice,
+  generateSecurityStatusBanner,
+  type SecurityStatus
 } from './formatters/report-formatter';
 
 async function run(): Promise<void> {
   try {
     core.info('🔍 Analyzing network access logs...');
+
+    // Whether protection was actually established. Setup failures are non-fatal, so without
+    // this the summary would report on a job that ran with no protection as if all were well.
+    const securityStatus: SecurityStatus = {
+      preSetupCompleted: core.getState('pre-setup-completed') === 'true',
+      mainSetupCompleted: core.getState('main-setup-completed') === 'true',
+      mode: core.getInput('mode') || 'analyze',
+      preSetupError: core.getState('pre-setup-error') || undefined
+    };
+
+    if (!securityStatus.preSetupCompleted && !securityStatus.mainSetupCompleted) {
+      core.error(
+        '🚨 Safer Runner applied NO network protection to this job. ' +
+          'Traffic was neither filtered nor recorded. See the job summary for details.'
+      );
+    } else if (!securityStatus.mainSetupCompleted) {
+      core.warning(
+        `Safer Runner ran in pre-hook monitoring only - the configured mode '${securityStatus.mode}' was never applied.`
+      );
+    }
 
     // Wait for logs to be written
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -80,7 +102,8 @@ async function run(): Promise<void> {
       preHookConnections,
       preHookDnsResolutions,
       preHookSudoCommands,
-      validationReport
+      validationReport,
+      securityStatus
     );
 
     core.info('✅ Network access summary generated');
@@ -127,13 +150,18 @@ async function generateJobSummary(
   preHookConnections: NetworkConnection[],
   preHookDnsResolutions: DnsResolution[],
   preHookSudoCommands: SudoCommand[],
-  validationReport: string
+  validationReport: string,
+  securityStatus: SecurityStatus
 ): Promise<void> {
   const mode = core.getInput('mode') || 'analyze';
   const blockRiskySubdomains = core.getBooleanInput('block-risky-github-subdomains');
   const jobName = process.env.GITHUB_JOB || 'unknown';
 
   let summary = `# Safer Runner Security Report\n\n`;
+
+  // Placed above everything else: if protection was not applied, that is the only thing
+  // about this report a reader needs to see first.
+  summary += generateSecurityStatusBanner(securityStatus);
 
   const modeIcon = mode === 'enforce' ? '🔒' : '📊';
   summary += `**Job:** ${jobName}\n`;
