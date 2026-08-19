@@ -386,7 +386,11 @@ Why each part matters:
 - **`Acquire::*::Timeout`** - unset by default, so a blackholed SYN blocks apt in `connect()`
   indefinitely with no output at all.
 - **`sudo env ... timeout -k 10 <secs> apt-get ...`** - a wall-clock backstop for anything the
-  apt options miss. `env` is needed because sudo does not forward `DEBIAN_FRONTEND`.
+  apt options miss. `env` is needed because sudo does not forward `DEBIAN_FRONTEND`. The update
+  ceiling is 150 seconds, set from measurement: a successful `apt-get update` took 22 seconds on
+  one GitHub runner and 81 seconds on another, so a ceiling near 81 would kill updates that were
+  about to succeed. Each command gets up to three attempts, so the worst case is bounded at a few
+  minutes and every attempt logs a warning.
 - **`verifyPackagesInstalled()`** - `apt-get update` exits 0 even when index downloads fail
   ("Some index files failed to download"), so its exit code does not prove the lists are usable.
   `dpkg-query -s` is checked afterwards instead, which also catches partial installs.
