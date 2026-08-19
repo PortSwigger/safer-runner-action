@@ -415,7 +415,7 @@ The action supports three sudo modes via `sudo.ts`:
 
 **2. Custom sudo config** (`sudo-config` input):
 ```yaml
-- uses: portswigger-tim/safer-runner-action@v1
+- uses: PortSwigger/safer-runner-action@v1
   with:
     sudo-config: |
       runner ALL=(root) NOPASSWD: /usr/bin/apt-get, /usr/bin/docker
@@ -437,7 +437,7 @@ The action can disable Docker access via `docker.ts`:
 
 **Disable Docker** (`disable-docker: true`):
 ```yaml
-- uses: portswigger-tim/safer-runner-action@v1
+- uses: PortSwigger/safer-runner-action@v1
   with:
     disable-docker: true
 ```
