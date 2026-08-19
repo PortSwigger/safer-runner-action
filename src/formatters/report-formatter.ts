@@ -359,3 +359,50 @@ export function getDnsStatusIcon(status: string): string {
       return '❓';
   }
 }
+
+export interface SecurityStatus {
+  /** Did the pre-hook finish establishing analyze-mode monitoring? */
+  preSetupCompleted: boolean;
+  /** Did the main action finish applying the user's configuration? */
+  mainSetupCompleted: boolean;
+  mode: string;
+  /** Error recorded by the pre-hook, if it failed */
+  preSetupError?: string;
+}
+
+/**
+ * Banner stating whether the job was actually protected.
+ *
+ * Setup failures are deliberately non-fatal, which previously meant a job could run with no
+ * network protection at all while the only trace was a `core.warning()` in the log. This makes
+ * that state impossible to miss in the job summary.
+ */
+export function generateSecurityStatusBanner(status: SecurityStatus): string {
+  const { preSetupCompleted, mainSetupCompleted, mode, preSetupError } = status;
+
+  if (mainSetupCompleted) {
+    return '';
+  }
+
+  if (!preSetupCompleted) {
+    let banner = `> [!CAUTION]\n`;
+    banner += `> ### 🚨 No network protection was applied to this job\n`;
+    banner += `> Safer Runner could not establish its security controls, so this job ran with **unrestricted network access**. `;
+    banner += `Traffic was neither filtered nor recorded, and the report below is therefore incomplete.\n`;
+
+    if (preSetupError) {
+      banner += `>\n> Cause: \`${preSetupError}\`\n`;
+    }
+
+    banner += `>\n> Re-running the job usually clears a transient package-mirror failure. `;
+    banner += `If it persists, the runner cannot reach the Ubuntu apt mirrors.\n\n`;
+    return banner;
+  }
+
+  let banner = `> [!WARNING]\n`;
+  banner += `> ### ⚠️ Configured mode \`${mode}\` was not applied\n`;
+  banner += `> The pre-hook established analyze-mode monitoring, but the main Safer Runner step did not run, `;
+  banner += `so your \`mode: ${mode}\` configuration was never applied and nothing was blocked. `;
+  banner += `Check whether an \`if:\` condition skipped the step.\n\n`;
+  return banner;
+}

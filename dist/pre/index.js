@@ -490,12 +490,18 @@ async function run() {
         // This captures sudo usage by other actions' pre-hooks
         core.info('Configuring sudo logging for pre-hook monitoring...');
         await (0, setup_1.setupSudoLogging)('/var/log/safer-runner/pre-sudo.log');
+        core.saveState('pre-setup-completed', 'true');
         core.info('✅ Pre-action: Security monitoring active (analyze mode)');
         core.info('   Main action will apply user configuration...');
     }
     catch (error) {
-        // Don't fail the workflow if pre-setup fails - log warning and continue
-        core.warning(`Pre-action setup encountered an error: ${error}`);
+        // Deliberately non-fatal - the main action gets a second chance at full setup. But this
+        // must be impossible to miss: if the calling workflow skips the main Safer Runner step,
+        // nothing else applies protection and the job runs with unrestricted network access.
+        const message = error instanceof Error ? error.message : String(error);
+        core.saveState('pre-setup-error', message);
+        core.error(`Safer Runner pre-hook could not establish security monitoring: ${message}. ` +
+            'If the main Safer Runner step does not run, this job has NO network protection.');
         core.warning('Main action will attempt full setup...');
     }
 }
@@ -546,12 +552,15 @@ var __importStar = (this && this.__importStar) || (function () {
     };
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.disableSudoForRunner = exports.applyCustomSudoConfig = exports.removeSudoLogging = exports.setupSudoLogging = void 0;
+exports.REQUIRED_PACKAGES = exports.disableSudoForRunner = exports.applyCustomSudoConfig = exports.removeSudoLogging = exports.setupSudoLogging = void 0;
+exports.installDependencies = installDependencies;
 exports.performInitialSetup = performInitialSetup;
 exports.createLogDirectory = createLogDirectory;
 exports.createRandomDNSUser = createRandomDNSUser;
 exports.setupIpsets = setupIpsets;
 exports.setupIptablesLogging = setupIptablesLogging;
+exports.buildOutputRules = buildOutputRules;
+exports.buildTerminalRules = buildTerminalRules;
 exports.setupFirewallRules = setupFirewallRules;
 exports.setupDNSConfig = setupDNSConfig;
 exports.setupDNSMasq = setupDNSMasq;
@@ -560,6 +569,7 @@ exports.finalizeFirewallRules = finalizeFirewallRules;
 const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
 const crypto = __importStar(__nccwpck_require__(6982));
+const fs = __importStar(__nccwpck_require__(9896));
 const dns_config_builder_1 = __nccwpck_require__(1877);
 // Re-export sudo functions from the sudo module for backwards compatibility
 var sudo_1 = __nccwpck_require__(1279);
@@ -567,6 +577,104 @@ Object.defineProperty(exports, "setupSudoLogging", ({ enumerable: true, get: fun
 Object.defineProperty(exports, "removeSudoLogging", ({ enumerable: true, get: function () { return sudo_1.removeSudoLogging; } }));
 Object.defineProperty(exports, "applyCustomSudoConfig", ({ enumerable: true, get: function () { return sudo_1.applyCustomSudoConfig; } }));
 Object.defineProperty(exports, "disableSudoForRunner", ({ enumerable: true, get: function () { return sudo_1.disableSudoForRunner; } }));
+/**
+ * Hardened apt options.
+ *
+ * GitHub-hosted runners have no IPv6 egress, but the runner image points apt at a failover
+ * mirror list (`mirror+file:/etc/apt/apt-mirrors.txt`: azure.archive.ubuntu.com, then
+ * archive.ubuntu.com, then security.ubuntu.com). When the Azure mirror is degraded apt falls
+ * back to the public archives, which can resolve to IPv6. The SYN is then blackholed and apt
+ * blocks in connect() indefinitely - observed as a 48 minute pre-hook hang with no output.
+ *
+ * - ForceIPv4          - never take the unreachable IPv6 path in the first place
+ * - Acquire::*::Timeout - unset by default on noble, so nothing otherwise bounds that wait
+ * - Acquire::Retries    - the runner image ships APT::Acquire::Retries "10", which multiplies
+ *                         every stall; pin our own low value instead
+ */
+const APT_OPTIONS = [
+    '-o',
+    'Acquire::ForceIPv4=true',
+    '-o',
+    'Acquire::http::Timeout=15',
+    '-o',
+    'Acquire::https::Timeout=15',
+    '-o',
+    'Acquire::Retries=2'
+];
+/** Wall-clock ceiling per apt invocation, as a backstop for anything the apt options miss */
+const APT_UPDATE_DEADLINE_SECONDS = 90;
+const APT_INSTALL_DEADLINE_SECONDS = 120;
+const APT_MAX_ATTEMPTS = 3;
+const APT_RETRY_DELAY_MS = 3000;
+exports.REQUIRED_PACKAGES = ['dnsmasq', 'ipset'];
+/**
+ * Run one apt command under a hard wall-clock timeout.
+ *
+ * `timeout` runs as root under sudo so it can signal apt; `-k 10` follows up with SIGKILL if
+ * apt ignores the SIGTERM. DEBIAN_FRONTEND is set via `env` because sudo does not forward it.
+ */
+async function runApt(deadlineSeconds, aptArgs) {
+    await exec.exec('sudo', [
+        'env',
+        'DEBIAN_FRONTEND=noninteractive',
+        'timeout',
+        '-k',
+        '10',
+        deadlineSeconds.toString(),
+        'apt-get',
+        ...aptArgs,
+        ...APT_OPTIONS
+    ]);
+}
+/**
+ * Install the packages the action needs, tolerating a transiently broken apt mirror.
+ *
+ * `apt-get update` exits 0 even when index downloads fail ("Some index files failed to
+ * download. They have been ignored, or old ones used instead."), so its exit code alone does
+ * not prove the package lists are usable. We therefore verify afterwards that the packages are
+ * genuinely installed rather than trusting apt's status.
+ */
+async function installDependencies(options = {}) {
+    var _a, _b;
+    const maxAttempts = (_a = options.maxAttempts) !== null && _a !== void 0 ? _a : APT_MAX_ATTEMPTS;
+    const retryDelayMs = (_b = options.retryDelayMs) !== null && _b !== void 0 ? _b : APT_RETRY_DELAY_MS;
+    await retryApt('apt-get update', maxAttempts, retryDelayMs, () => runApt(APT_UPDATE_DEADLINE_SECONDS, ['update', '-q']));
+    await retryApt('apt-get install', maxAttempts, retryDelayMs, () => runApt(APT_INSTALL_DEADLINE_SECONDS, ['install', '-y', '-q', ...exports.REQUIRED_PACKAGES]));
+    await verifyPackagesInstalled();
+}
+async function retryApt(label, maxAttempts, retryDelayMs, run) {
+    let lastError;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        try {
+            await run();
+            return;
+        }
+        catch (error) {
+            lastError = error;
+            core.warning(`${label} failed (attempt ${attempt}/${maxAttempts}): ${error}`);
+            if (attempt < maxAttempts) {
+                await new Promise(resolve => setTimeout(resolve, retryDelayMs));
+            }
+        }
+    }
+    throw new Error(`${label} failed after ${maxAttempts} attempts: ${lastError}`);
+}
+/**
+ * Confirm the packages are actually installed.
+ *
+ * Without this a degraded mirror produces `apt-get update` exit 0 followed by
+ * `E: Unable to locate package dnsmasq`, and the caller carries on believing setup worked.
+ */
+async function verifyPackagesInstalled() {
+    const exitCode = await exec.exec('dpkg-query', ['-s', ...exports.REQUIRED_PACKAGES], {
+        ignoreReturnCode: true,
+        silent: true
+    });
+    if (exitCode !== 0) {
+        throw new Error(`Required packages are not installed after apt-get install: ${exports.REQUIRED_PACKAGES.join(', ')}. ` +
+            'The apt mirror is likely unreachable from this runner.');
+    }
+}
 /**
  * Perform initial system setup: install dependencies, create DNS user, setup ipsets, create log directory
  * Note: Sudo logging is NOT configured here - it's set up at the end of pre/main actions
@@ -576,8 +684,7 @@ Object.defineProperty(exports, "disableSudoForRunner", ({ enumerable: true, get:
 async function performInitialSetup() {
     // Install dependencies
     core.info('Installing dependencies...');
-    await exec.exec('sudo', ['apt-get', 'update', '-qq']);
-    await exec.exec('sudo', ['apt-get', 'install', '-y', 'dnsmasq', 'ipset']);
+    await installDependencies();
     // Create log directory for all safer-runner logs
     core.info('Creating log directory...');
     await createLogDirectory();
@@ -681,6 +788,64 @@ async function setupIptablesLogging(logFile, logPrefixes, configSuffix = '') {
     await exec.exec('sudo', ['systemctl', 'restart', 'rsyslog']);
 }
 /**
+ * Build the OUTPUT chain rules in iptables-restore syntax.
+ *
+ * Kept as a pure function so the rule set can be asserted directly in tests - these rules are
+ * the network half of the security model and a silent typo would not otherwise be caught.
+ *
+ * Note the quoting on --log-prefix: the prefixes carry a trailing space that the rsyslog
+ * filters match on, and iptables-restore would otherwise drop it.
+ */
+function buildOutputRules(options) {
+    const { dnsUid, logPrefix, primaryDnsServer, secondaryDnsServer } = options;
+    const rules = [
+        // Allow established connections on eth0
+        '-A OUTPUT -o eth0 -m conntrack --ctstate ESTABLISHED -j ACCEPT',
+        // Allow Azure metadata service (required for GitHub Actions)
+        '-A OUTPUT -o eth0 -d 168.63.129.16 -j ACCEPT',
+        '-A OUTPUT -o eth0 -d 169.254.169.254 -j ACCEPT',
+        // Log then allow GitHub ipset matches
+        `-A OUTPUT -o eth0 -m set --match-set github dst -j LOG --log-prefix "${logPrefix}GitHub-Allow: "`,
+        '-A OUTPUT -o eth0 -m set --match-set github dst -j ACCEPT',
+        // Log then allow user-allowed ipset matches
+        `-A OUTPUT -o eth0 -m set --match-set user dst -j LOG --log-prefix "${logPrefix}User-Allow: "`,
+        '-A OUTPUT -o eth0 -m set --match-set user dst -j ACCEPT',
+        // Allow DNS to our upstream servers - only from the random DNS user UID
+        `-A OUTPUT -o eth0 -d ${primaryDnsServer} -p udp --dport 53 -m owner --uid-owner ${dnsUid} -j ACCEPT`,
+        // Drop ICMP destination-unreachable without logging: these are kernel-generated
+        // responses to DNS queries, not security-relevant
+        `-A OUTPUT -o eth0 -d ${primaryDnsServer} -p icmp --icmp-type destination-unreachable -j DROP`
+    ];
+    if (secondaryDnsServer) {
+        rules.push(`-A OUTPUT -o eth0 -d ${secondaryDnsServer} -p udp --dport 53 -m owner --uid-owner ${dnsUid} -j ACCEPT`, `-A OUTPUT -o eth0 -d ${secondaryDnsServer} -p icmp --icmp-type destination-unreachable -j DROP`);
+    }
+    return rules;
+}
+/**
+ * Build the terminal OUTPUT rules: default deny in enforce mode, log-and-allow in analyze mode.
+ * Applied separately from buildOutputRules() so the default-deny lands only once the DNS layer
+ * is ready.
+ */
+function buildTerminalRules(mode, logPrefix) {
+    if (mode === 'enforce') {
+        return [`-A OUTPUT -o eth0 -j LOG --log-prefix "${logPrefix}Drop-Enforce: "`, '-A OUTPUT -o eth0 -j DROP'];
+    }
+    return [`-A OUTPUT -o eth0 -j LOG --log-prefix "${logPrefix}Allow-Analyze: "`, '-A OUTPUT -o eth0 -j ACCEPT'];
+}
+/**
+ * Append rules to the filter table in a single iptables-restore call.
+ *
+ * --noflush is essential: without it iptables-restore replaces every chain in the filter
+ * table, wiping INPUT and FORWARD, which validation.ts baselines and would then report as
+ * tampering.
+ */
+async function applyOutputRules(rules) {
+    const script = `*filter\n${rules.join('\n')}\nCOMMIT\n`;
+    await exec.exec('sudo', ['iptables-restore', '--noflush'], {
+        input: Buffer.from(script)
+    });
+}
+/**
  * Setup iptables firewall rules
  *
  * IMPORTANT: The DNS server parameters MUST match what will be configured in setupDNSMasq().
@@ -692,163 +857,9 @@ async function setupIptablesLogging(logFile, logPrefixes, configSuffix = '') {
  * @param secondaryDnsServer - Secondary DNS server IP (defaults to Quad9: 149.112.112.112)
  */
 async function setupFirewallRules(dnsUid, logPrefix = '', primaryDnsServer = dns_config_builder_1.DEFAULT_DNS_SERVER, secondaryDnsServer = dns_config_builder_1.SECONDARY_DNS_SERVER) {
-    // Flush OUTPUT chain
+    // Flush OUTPUT only - INPUT and FORWARD are deliberately left alone
     await exec.exec('sudo', ['iptables', '-F', 'OUTPUT']);
-    // Allow established connections on eth0
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-m',
-        'conntrack',
-        '--ctstate',
-        'ESTABLISHED',
-        '-j',
-        'ACCEPT'
-    ]);
-    // Allow Azure metadata service (required for GitHub Actions)
-    await exec.exec('sudo', ['iptables', '-A', 'OUTPUT', '-o', 'eth0', '-d', '168.63.129.16', '-j', 'ACCEPT']);
-    await exec.exec('sudo', ['iptables', '-A', 'OUTPUT', '-o', 'eth0', '-d', '169.254.169.254', '-j', 'ACCEPT']);
-    // Log GitHub ipset matches
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-m',
-        'set',
-        '--match-set',
-        'github',
-        'dst',
-        '-j',
-        'LOG',
-        `--log-prefix=${logPrefix}GitHub-Allow: `
-    ]);
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-m',
-        'set',
-        '--match-set',
-        'github',
-        'dst',
-        '-j',
-        'ACCEPT'
-    ]);
-    // Log user-allowed ipset matches
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-m',
-        'set',
-        '--match-set',
-        'user',
-        'dst',
-        '-j',
-        'LOG',
-        `--log-prefix=${logPrefix}User-Allow: `
-    ]);
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-m',
-        'set',
-        '--match-set',
-        'user',
-        'dst',
-        '-j',
-        'ACCEPT'
-    ]);
-    // Allow DNS traffic to our upstream servers - only from the random DNS user UID
-    // Primary DNS server (configurable, defaults to Quad9 primary: 9.9.9.9)
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-d',
-        primaryDnsServer,
-        '-p',
-        'udp',
-        '--dport',
-        '53',
-        '-m',
-        'owner',
-        '--uid-owner',
-        dnsUid.toString(),
-        '-j',
-        'ACCEPT'
-    ]);
-    // Drop ICMP destination-unreachable to primary DNS server without logging
-    // These are kernel-generated responses to DNS queries, not security-relevant
-    await exec.exec('sudo', [
-        'iptables',
-        '-A',
-        'OUTPUT',
-        '-o',
-        'eth0',
-        '-d',
-        primaryDnsServer,
-        '-p',
-        'icmp',
-        '--icmp-type',
-        'destination-unreachable',
-        '-j',
-        'DROP'
-    ]);
-    // Secondary DNS server (configurable, defaults to Quad9 secondary: 149.112.112.112)
-    // Only add rule if secondary DNS server is provided
-    if (secondaryDnsServer) {
-        await exec.exec('sudo', [
-            'iptables',
-            '-A',
-            'OUTPUT',
-            '-o',
-            'eth0',
-            '-d',
-            secondaryDnsServer,
-            '-p',
-            'udp',
-            '--dport',
-            '53',
-            '-m',
-            'owner',
-            '--uid-owner',
-            dnsUid.toString(),
-            '-j',
-            'ACCEPT'
-        ]);
-        // Drop ICMP destination-unreachable to secondary DNS server without logging
-        // These are kernel-generated responses to DNS queries, not security-relevant
-        await exec.exec('sudo', [
-            'iptables',
-            '-A',
-            'OUTPUT',
-            '-o',
-            'eth0',
-            '-d',
-            secondaryDnsServer,
-            '-p',
-            'icmp',
-            '--icmp-type',
-            'destination-unreachable',
-            '-j',
-            'DROP'
-        ]);
-    }
+    await applyOutputRules(buildOutputRules({ dnsUid, logPrefix, primaryDnsServer, secondaryDnsServer }));
 }
 async function setupDNSConfig() {
     // Configure systemd-resolved to use our DNS server
@@ -886,48 +897,46 @@ async function setupDNSMasq(mode, allowedDomains, blockRiskySubdomains, dnsUsern
     await exec.exec('sudo', ['chown', 'root:root', '/etc/dnsmasq.conf']);
     return blockedSubdomains;
 }
-async function restartServices(logFile) {
-    // Restart systemd-resolved and start dnsmasq
-    await exec.exec('sudo', ['systemctl', 'restart', 'systemd-resolved']);
+const LOG_FILE_TIMEOUT_MS = 5000;
+const LOG_FILE_POLL_INTERVAL_MS = 50;
+async function restartServices(logFile, options = {}) {
+    var _a, _b;
+    // systemd-resolved only needs restarting once per job: setupDNSConfig() writes identical
+    // content every time, so a second restart is pure latency.
+    if (!options.skipResolvedRestart) {
+        await exec.exec('sudo', ['systemctl', 'restart', 'systemd-resolved']);
+    }
     await exec.exec('sudo', ['systemctl', 'restart', 'dnsmasq']);
-    // After dnsmasq starts and creates log files, make them readable by all
-    if (logFile) {
-        // Wait a moment for dnsmasq to create the log file
-        await new Promise(resolve => setTimeout(resolve, 500));
-        // Make log file world-readable (dnsmasq creates it as 660)
-        await exec.exec('sudo', ['chmod', '0644', logFile]);
+    if (!logFile) {
+        return;
+    }
+    // dnsmasq creates its log file as 0640, so the runner cannot read it without sudo.
+    // Poll for the file rather than sleeping a fixed interval: a sleep that is too short makes
+    // the chmod fail on a missing file and aborts the whole setup, and one that is long enough
+    // to be safe is wasted time on every run.
+    const appeared = await waitForFile(logFile, (_a = options.logFileTimeoutMs) !== null && _a !== void 0 ? _a : LOG_FILE_TIMEOUT_MS, (_b = options.pollIntervalMs) !== null && _b !== void 0 ? _b : LOG_FILE_POLL_INTERVAL_MS);
+    if (!appeared) {
+        core.warning(`dnsmasq did not create ${logFile}. DNS activity will be missing from the security report. ` +
+            'Check `systemctl status dnsmasq`.');
+        return;
+    }
+    await exec.exec('sudo', ['chmod', '0644', logFile]);
+}
+/** Poll for a path to exist, returning false if it never shows up within the timeout */
+async function waitForFile(filePath, timeoutMs, pollIntervalMs) {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+        if (fs.existsSync(filePath)) {
+            return true;
+        }
+        if (Date.now() >= deadline) {
+            return false;
+        }
+        await new Promise(resolve => setTimeout(resolve, pollIntervalMs));
     }
 }
 async function finalizeFirewallRules(mode, logPrefix = '') {
-    if (mode === 'enforce') {
-        // Log traffic that doesn't match any ipset (will be dropped)
-        await exec.exec('sudo', [
-            'iptables',
-            '-A',
-            'OUTPUT',
-            '-o',
-            'eth0',
-            '-j',
-            'LOG',
-            `--log-prefix=${logPrefix}Drop-Enforce: `
-        ]);
-        // DEFAULT DENY: Drop external traffic not explicitly allowed (scoped to eth0)
-        await exec.exec('sudo', ['iptables', '-A', 'OUTPUT', '-o', 'eth0', '-j', 'DROP']);
-    }
-    else {
-        // Analyze mode: Log traffic that doesn't match any ipset (but still allow it)
-        await exec.exec('sudo', [
-            'iptables',
-            '-A',
-            'OUTPUT',
-            '-o',
-            'eth0',
-            '-j',
-            'LOG',
-            `--log-prefix=${logPrefix}Allow-Analyze: `
-        ]);
-        await exec.exec('sudo', ['iptables', '-A', 'OUTPUT', '-o', 'eth0', '-j', 'ACCEPT']);
-    }
+    await applyOutputRules(buildTerminalRules(mode, logPrefix));
 }
 
 

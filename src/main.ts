@@ -49,6 +49,8 @@ async function run(): Promise<void> {
     const preUsername = core.getState('dns-user');
     const preUid = core.getState('dns-uid');
     const preActionRan = preUsername && preUid;
+    // Only trust the pre-hook's system-level work if it ran all the way through
+    const preSetupCompleted = core.getState('pre-setup-completed') === 'true';
 
     let dnsUser: DnsUser;
 
@@ -56,14 +58,6 @@ async function run(): Promise<void> {
       // Pre-action didn't run - do full setup
       core.info('Pre-action did not run - performing full setup...');
       dnsUser = await performInitialSetup();
-
-      // Setup rsyslog for main action iptables logs (pre-action would have already done this)
-      core.info('Configuring iptables log filtering...');
-      await setupIptablesLogging(
-        '/var/log/safer-runner/main-iptables.log',
-        ['Main-GitHub-Allow', 'Main-User-Allow', 'Main-Drop-Enforce', 'Main-Allow-Analyze'],
-        'main'
-      );
     } else {
       // Pre-action already set up infrastructure - just reconfigure
       core.info('✅ Pre-action already established monitoring infrastructure');
@@ -71,19 +65,21 @@ async function run(): Promise<void> {
         username: preUsername,
         uid: parseInt(preUid, 10)
       };
-
-      // Setup rsyslog for main action iptables logs (separate from pre-hook logs)
-      core.info('Configuring iptables log filtering for main action...');
-      await setupIptablesLogging(
-        '/var/log/safer-runner/main-iptables.log',
-        ['Main-GitHub-Allow', 'Main-User-Allow', 'Main-Drop-Enforce', 'Main-Allow-Analyze'],
-        'main'
-      );
     }
 
-    // Configure iptables rules with Main- log prefix
+    // Setup rsyslog for main action iptables logs (separate from any pre-hook logs)
+    core.info('Configuring iptables log filtering for main action...');
+    await setupIptablesLogging(
+      '/var/log/safer-runner/main-iptables.log',
+      ['Main-GitHub-Allow', 'Main-User-Allow', 'Main-Drop-Enforce', 'Main-Allow-Analyze'],
+      'main'
+    );
+
+    // Configure iptables rules with Main- log prefix.
+    // The DNS servers MUST match the ones given to setupDNSMasq() below: the firewall only
+    // permits DNS to the servers named here, so a mismatch drops every query dnsmasq makes.
     core.info('Configuring iptables rules...');
-    await setupFirewallRules(dnsUser.uid, 'Main-');
+    await setupFirewallRules(dnsUser.uid, 'Main-', primaryDnsServer, secondaryDnsServer);
 
     // Configure DNS filtering
     core.info('Configuring DNS filtering...');
@@ -108,9 +104,10 @@ async function run(): Promise<void> {
       }
     }
 
-    // Start services
+    // Start services. systemd-resolved does not need restarting again when the pre-hook
+    // already restarted it with identical configuration.
     core.info('Restarting services...');
-    await restartServices('/var/log/safer-runner/main-dns.log');
+    await restartServices('/var/log/safer-runner/main-dns.log', { skipResolvedRestart: preSetupCompleted });
 
     // Finalize firewall rules with Main- log prefix
     core.info('Finalizing firewall rules...');
@@ -149,6 +146,8 @@ async function run(): Promise<void> {
     // This ensures internal setup commands are not logged
     core.info('Configuring sudo logging for workflow monitoring...');
     await setupSudoLogging('/var/log/safer-runner/main-sudo.log');
+
+    core.saveState('main-setup-completed', 'true');
 
     core.info(`✅ Safer Runner Action configured successfully in ${mode} mode`);
   } catch (error) {
