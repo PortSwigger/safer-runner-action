@@ -106,29 +106,32 @@ npm test             # Run Jest tests only
 
 ## 📊 Logging & Reporting
 
-### Separate Log Files for Pre-hook and Main Action
+### Log Files
 
-**DNS Logs** (DNSmasq with `log-facility`):
-- Pre-hook: `/var/log/safer-runner/pre-dns.log`
-- Main action: `/var/log/safer-runner/main-dns.log`
-- Parsed by `parsers/dns-parser.ts`
+Everything lands under `/var/log/safer-runner/`, world-readable so the runner user can read it
+without sudo. One file per phase per layer, which is what keeps pre-hook activity separate from
+the user's own workflow in the report.
 
-**Network Logs** (iptables with rsyslog filtering):
-- Pre-hook: `/var/log/safer-runner/pre-iptables.log`
-- Main action: `/var/log/safer-runner/main-iptables.log`
-- Pre-hook prefixes: `Pre-GitHub-Allow:`, `Pre-User-Allow:`, `Pre-Allow-Analyze:`
-- Main action prefixes: `Main-GitHub-Allow:`, `Main-User-Allow:`, `Main-Drop-Enforce:`, `Main-Allow-Analyze:`
-- Filtered by rsyslog configuration (`/etc/rsyslog.d/10-iptables-safer-runner.conf`)
-- Parsed by `parsers/network-parser.ts`
-- Readable by runner user (no sudo required)
+| Phase | Layer | File | Written by | Parsed by |
+|---|---|---|---|---|
+| Pre-hook | DNS | `pre-dns.log` | dnsmasq `log-facility` | `parsers/dns-parser.ts` |
+| Main | DNS | `main-dns.log` | dnsmasq `log-facility` | `parsers/dns-parser.ts` |
+| Pre-hook | Network | `pre-iptables.log` | rsyslog, `/etc/rsyslog.d/10-iptables-safer-runner-pre.conf` | `parsers/network-parser.ts` |
+| Main | Network | `main-iptables.log` | rsyslog, `/etc/rsyslog.d/10-iptables-safer-runner-main.conf` | `parsers/network-parser.ts` |
+| Pre-hook | Sudo | `pre-sudo.log` | sudo `Defaults logfile`, `/etc/sudoers.d/00-sudo-logging` | `parsers/sudo-parser.ts` |
+| Main | Sudo | `main-sudo.log` | sudo `Defaults logfile`, `/etc/sudoers.d/00-sudo-logging` | `parsers/sudo-parser.ts` |
 
-**Sudo Logs** (sudo logfile):
-- Pre-hook sudo usage logged to `/var/log/safer-runner/pre-sudo.log`
-- Main action sudo usage logged to `/var/log/safer-runner/main-sudo.log`
-- Configured via `/etc/sudoers.d/00-sudo-logging`
-- Captures: user, tty, pwd, user, command for every sudo invocation
-- Readable by runner user (no sudo required to view)
-- Parsed by `parsers/sudo-parser.ts`
+The rsyslog filters match on the iptables log prefix, which is why the prefixes differ per phase:
+
+| Phase | Prefixes matched |
+|---|---|
+| Pre-hook | `Pre-GitHub-Allow:`, `Pre-User-Allow:`, `Pre-Allow-Analyze:` |
+| Main | `Main-GitHub-Allow:`, `Main-User-Allow:`, `Main-Drop-Enforce:`, `Main-Allow-Analyze:` |
+
+Each sudo entry records the invoking user, tty, working directory, target user and the full
+command. `sudo.ts` excludes the action's own setup commands via
+`Defaults!SAFER_RUNNER_CONFIG !log_allowed`, so the log shows the workflow's sudo usage rather
+than the action's.
 
 ### Post-Action Summary Generation
 
@@ -152,10 +155,11 @@ The `post.ts` generates a comprehensive job summary with:
 
 1. **Modify source** - Edit `src/*.ts` files
 2. **Build & test** - `npm run package`
-3. **Test locally** - Use validation test: `node src/validation.test.ts`
+3. **Test locally** - `npm test -- validation.test.ts`
 4. **Commit source + dist** - Always commit both `.ts` and `.js` files
 5. **Push changes** - Use `GIT_SSH_COMMAND="ssh -o IdentitiesOnly=yes" git push` to avoid SSH agent certificate issues
-6. **Test in GitHub Actions** - Use the test workflow
+6. **Test on a runner** - there is no CI, so push to a branch and reference it from a workflow
+   in another repository (`uses: PortSwigger/safer-runner-action@<sha>`)
 
 ### Adding New Security Features
 
@@ -190,7 +194,7 @@ The `post.ts` generates a comprehensive job summary with:
 #### Local Testing
 ```bash
 # Test validation system
-node lib/validation.test.ts
+npm test -- validation.test.ts
 
 # Check TypeScript compilation
 npx tsc --noEmit
@@ -247,13 +251,23 @@ sudo ipset list user
 
 ## 🧪 Testing Strategy
 
-### Automated Tests - `.github/workflows/test.yml`
+### Build status: there is no CI
 
-1. **test-analyze-mode** - Network monitoring without blocking
-2. **test-enforce-mode** - Active threat blocking
-3. **test-github-actions-compatibility** - GitHub Actions integration
-4. **test-edge-cases** - DNS resolution, localhost, direct IPs
-5. **test-system-integrity** - Validation system with Falco integration
+This repository runs no workflows. `npm test` covers the parsers, formatters, config builders
+and rule generation, but nothing exercises the action on a runner, so DNS filtering and firewall
+enforcement are only ever verified by hand.
+
+An integration suite covering analyze mode, enforce mode, GitHub Actions compatibility, edge
+cases (localhost, direct IPs, CNAME chains) and system integrity did exist. It was removed in
+`4f01c15`, whose message says "remove workflow for publishing", alongside the
+`action.yml` to `action.yaml` rename. Recover it with:
+
+```bash
+git show 4f01c15^:.github/workflows/test.yml
+```
+
+Restoring it is the single highest-value thing outstanding on this repository. It was written
+against the pre-`iptables-restore` behaviour, so expect it to need a pass.
 
 ### Manual Testing Scenarios
 
@@ -270,21 +284,9 @@ echo "# TEST" | sudo tee -a /etc/dnsmasq.conf  # Should be detected
 
 ## 🚨 Security Considerations
 
-### Limitations & Workarounds
-
-The README documents potential attack vectors:
-1. **Data exfiltration via allowed domains** - Abuse GitHub/npm for data theft
-2. **DNS tunneling** - Encode data in DNS queries
-3. **Local file system attacks** - Stage data for later exfiltration
-4. **Process/system call abuse** - Container escapes, privilege escalation
-
-### Defense in Depth
-
-Network filtering is **first line of defense**. Recommended complementary tools:
-- **Falco** - Runtime security monitoring
-- **Container security** - Distroless images, read-only filesystems
-- **Dependency scanning** - Snyk, Dependabot
-- **SIEM integration** - Log forwarding and analysis
+Attack vectors and the complementary controls this action does not replace are documented for
+users in [README.md](README.md#security-limitations). Keep the two in step when the threat model
+changes: a control described there has to exist here.
 
 ## 📝 Common Tasks
 
@@ -332,7 +334,7 @@ await setupDNSMasq(mode, allowedDomains, blockRiskySubdomains, dnsUser.username,
 
 ### Configure Custom DNS Servers
 
-The action supports configurable DNS servers (v1.2.0+) via `primary-dns-server` and `secondary-dns-server` inputs.
+DNS servers are configurable via the `primary-dns-server` and `secondary-dns-server` inputs.
 
 **Files to modify**: `src/main.ts`, `src/pre.ts`, and `src/setup.ts`
 
@@ -522,22 +524,13 @@ The action can disable Docker access via `docker.ts`:
 
 ### Why Separate Log Files for DNS and iptables?
 
-We use dedicated log files filtered by rsyslog for both DNS and iptables logs:
+See [Log Files](#log-files) for the inventory. Dedicated files rather than syslog because the
+report has to attribute activity to a phase, and the runner user has to be able to read them
+without sudo (which it cannot do for `/var/log/syslog`). Parsing a dedicated file also avoids
+scanning the whole of syslog on every job.
 
-**DNS Logs** (DNSmasq `log-facility`):
-- **Pre-hook**: `/var/log/safer-runner/pre-dns.log`
-- **Main action**: `/var/log/safer-runner/main-dns.log`
-
-**Network Logs** (rsyslog filtering):
-- **Pre-hook**: `/var/log/safer-runner/pre-iptables.log` (filters `Pre-GitHub-Allow:`, `Pre-User-Allow:`, `Pre-Allow-Analyze:`)
-- **Main action**: `/var/log/safer-runner/main-iptables.log` (filters `Main-GitHub-Allow:`, `Main-User-Allow:`, `Main-Drop-Enforce:`, `Main-Allow-Analyze:`)
-
-**Benefits**:
-✅ Clear separation between pre-hook and main action activity
-✅ No sudo required to read logs (world-readable files)
-✅ Easier parsing (dedicated files, no grep filtering needed)
-✅ Better performance (avoid parsing entire syslog)
-✅ Log prefixes prevent conflicts (`Pre-` vs `Main-` ensures rsyslog regex doesn't match both)
+The `Pre-` and `Main-` prefixes exist so the two rsyslog filters cannot match each other's
+lines. Without distinct prefixes a substring match would send every line to both files.
 
 ### Why Three-Phase Lifecycle (pre/main/post)?
 
@@ -552,19 +545,6 @@ We use dedicated log files filtered by rsyslog for both DNS and iptables logs:
 `ipset` provides O(1) lookup for IP addresses vs O(n) for individual iptables rules. With dozens of GitHub domains (each resolving to multiple IPs), this prevents performance degradation as more IPs are allowed.
 
 ---
-
-## 💡 Pro Tips
-
-1. **Always test both modes** - Analyze and enforce behave differently
-2. **Use `npm run package`** - Builds all three JS files and runs tests
-3. **Watch file sizes** - Dist files ~900-1000KB each is normal
-4. **Check log files first** - `/var/log/safer-runner/pre-dns.log` and `/var/log/safer-runner/main-dns.log` are your friends
-5. **Test pre-hook separately** - Add debug logging to verify it runs first
-6. **Update tests when changing parsers** - DNS and network parsers have comprehensive test coverage
-7. **Verify dist files are committed** - GitHub Actions won't see your changes otherwise
-8. **Read job summaries** - Post-action generates detailed security reports
-9. **Test edge cases** - Direct IPs, localhost, CNAME chains, multiple IPs per domain
-10. **Document changes** - Update this file when making significant modifications
 
 ## 🔍 Code Quality
 
@@ -587,12 +567,3 @@ We use dedicated log files filtered by rsyslog for both DNS and iptables logs:
 **Run tests**: `npm test` (uses Jest)
 **Run specific test**: `npm test -- dns-parser.test.ts`
 **Watch mode**: `npm test -- --watch`
-
-## 📞 Getting Help
-
-- **GitHub Issues** - Bug reports and feature requests
-- **Code Review** - Use test workflow to validate changes
-- **Documentation** - README.md for user-facing docs
-- **Security** - Follow responsible disclosure for security issues
-
-Remember: This action protects against supply chain attacks. Changes should be thoroughly tested and reviewed for security implications.
