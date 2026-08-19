@@ -6,23 +6,17 @@ Multi-layer security for GitHub Actions runners with network filtering (DNS + ip
 
 ### ✅ Use This Action If You:
 
-- **Run untrusted code** in GitHub Actions (open source projects accepting PRs from external contributors)
-- **Use third-party actions** and want visibility into their network activity
-- **Accept community contributions** and need supply chain attack protection
-- **Build open source software** with dependencies from npm, PyPI, or other package registries
+- **Run code you did not write**: external PRs, third-party actions, or dependencies from npm, PyPI and similar registries
 - **Need compliance evidence** showing network access controls and audit trails
-- **Use GitHub-hosted Ubuntu runners** (ubuntu-latest, ubuntu-22.04, ubuntu-20.04)
-- **Want security observability** before committing to enforcement (analyze mode)
+- **Want observability before enforcement**: analyze mode reports what your build reaches without blocking anything
 
 ### ❌ This Action Is NOT For You If:
 
 - **You only run trusted, first-party code** with no external dependencies
-- **You use Windows or macOS runners** (Linux/Ubuntu only)
-- **Your jobs run in containers** (`container:` in workflow - sudo access conflicts)
-- **You use self-hosted non-Ubuntu runners** (RHEL, Debian, etc. - not currently supported)
-- **Your workflow requires unrestricted network access** to arbitrary domains
-- **You need sub-second performance** (adds ~2-5s overhead for security setup)
-- **You want protection against sophisticated attackers** using allowed domain abuse (this is first-line defense only)
+- **Your workflow needs unrestricted network access** to arbitrary domains
+- **Your runner is not Ubuntu, or your job runs in a container**: see [Platform Support](#platform-support)
+- **Setup time matters more than the coverage**: the action installs `dnsmasq` and `ipset` from the Ubuntu archive before your first step runs, so the overhead is dominated by apt and is measured in tens of seconds, not milliseconds
+- **You need protection against a determined attacker** abusing an allowed domain: this is a first line of defense, not a complete one
 
 ### 💡 Common Use Cases
 
@@ -142,7 +136,7 @@ steps:
   - run: npm install  # DNS queries use Cloudflare instead of Quad9
 ```
 
-**Default DNS**: Quad9 (`9.9.9.9` / `149.112.112.112`) with 98% malware blocking
+**Default DNS**: Quad9 (`9.9.9.9` / `149.112.112.112`), which filters known-malicious domains upstream of the action's own allowlist
 
 **Disable secondary DNS** by passing an empty string (single DNS server only):
 
@@ -162,9 +156,9 @@ steps:
 
 ### Platform Support
 
-- **GitHub-hosted runners**: Only Ubuntu runners are supported. Windows and macOS runners are not supported.
-- **Self-hosted runners**: Only Ubuntu runners with sudo access and iptables support. Other Linux distributions (RHEL, Debian, etc.) and Windows/macOS runners are not supported.
-- **Containerized jobs**: Not supported when the job runs in a container due to sudo access requirements.
+- **GitHub-hosted runners**: Ubuntu only. Windows and macOS are not supported.
+- **Self-hosted runners**: Ubuntu only, with sudo access and iptables. Other distributions (RHEL, Debian) are not supported.
+- **Containerized jobs**: not supported. The action needs sudo on the runner itself, which a job running in a container does not have.
 
 ### Security Limitations
 
@@ -211,5 +205,4 @@ cat /var/log/safer-runner/main-sudo.log     # Main action sudo commands
 
 ## License
 
-This action is provided as-is for defensive security purposes.
-
+MIT. See [LICENSE](LICENSE).
