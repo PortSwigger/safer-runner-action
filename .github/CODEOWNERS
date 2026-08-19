@@ -1,0 +1,33 @@
+# Code owners for safer-runner-action
+#
+# This repository is a security control. The compiled bundles in dist/ execute on every runner
+# that uses the action, with sudo, before any workflow step runs, so a change merged here changes
+# the security posture of every consuming pipeline.
+#
+# The org default repository permission is write, so every PortSwigger org member can push a
+# branch here. Requiring review from these owners on main is what stops a change to the security
+# posture landing without security or platform seeing it.
+#
+# Owners must have write access to the repository or GitHub silently ignores them. Verified for
+# all six accounts below.
+#
+# Last matching pattern wins, so the catch-all comes first and the specific paths after it.
+
+# Everything. The whole repository is the control, not one directory of it.
+*                   @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+
+# What actually runs on a runner. dist/ is built from src/ but committed separately, so it can be
+# changed without touching a single line of TypeScript.
+/dist/              @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+/src/               @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+
+# The action contract: which entrypoints run at pre, main and post, and the inputs that select
+# analyze or enforce mode.
+/action.yaml        @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+
+# Dependencies pulled into the bundles at build time.
+/package.json       @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+/package-lock.json  @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
+
+# Workflows, and this file. Without this line a PR could rewrite its own review requirements.
+/.github/           @portswigger-josh @portswigger-mattlong @portswigger-amason @nresare @ps-pufferfish @Mo-PS
