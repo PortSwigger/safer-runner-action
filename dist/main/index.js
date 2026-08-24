@@ -794,8 +794,15 @@ const APT_OPTIONS = [
     '-o',
     'Acquire::Retries=2'
 ];
-/** Wall-clock ceiling per apt invocation, as a backstop for anything the apt options miss */
-const APT_UPDATE_DEADLINE_SECONDS = 90;
+/**
+ * Wall-clock ceiling per apt invocation, as a backstop for anything the apt options miss.
+ *
+ * The update ceiling is set from measurement rather than taste: a successful `apt-get update`
+ * took 22 seconds on one GitHub runner and 81 seconds on another. A ceiling near 81 seconds
+ * would kill updates that were about to succeed and force a needless retry, so it sits well
+ * clear of the slow case while still bounding a genuinely stalled mirror.
+ */
+const APT_UPDATE_DEADLINE_SECONDS = 150;
 const APT_INSTALL_DEADLINE_SECONDS = 120;
 const APT_MAX_ATTEMPTS = 3;
 const APT_RETRY_DELAY_MS = 3000;

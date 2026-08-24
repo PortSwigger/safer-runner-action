@@ -50,6 +50,18 @@ describe('installDependencies - apt hardening', () => {
       expect(Number(retries![1])).toBeLessThanOrEqual(3);
     });
 
+    it('gives apt-get update enough headroom for a slow but working mirror', async () => {
+      await installDependencies();
+
+      const deadline = aptUpdate()[0].match(/timeout -k 10 (\d+)/);
+      expect(deadline).not.toBeNull();
+
+      // Measured on real runners via the wirewool canary: a successful `apt-get update` took
+      // 22s on one runner and 81s on another. A deadline close to 81s kills updates that would
+      // have succeeded and forces a needless retry, so it needs clear headroom above that.
+      expect(Number(deadline![1])).toBeGreaterThanOrEqual(120);
+    });
+
     it('runs every apt command under a hard wall-clock timeout', async () => {
       await installDependencies();
 
