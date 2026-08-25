@@ -8,6 +8,8 @@ import {
   hasNoNewPrivs,
   hasSystemd,
   isEnabled,
+  parseMode,
+  describeMode,
   warnIfRunnerUnsupported
 } from './preflight';
 
@@ -48,6 +50,20 @@ describe('isEnabled', () => {
   it('does not treat an unrelated value as disabled, so a typo cannot silently drop protection', () => {
     expect(isEnabled('no')).toBe(true);
     expect(isEnabled('0')).toBe(true);
+  });
+
+  it('warns on a value that is neither true nor false, so `enabled: no` is not silent', () => {
+    // Whoever writes `enabled: no` is reaching for this input because something is already
+    // wrong on their runner. Treating it as true is safe; saying nothing is not helpful.
+    expect(isEnabled('no')).toBe(true);
+    expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('must be true or false'));
+  });
+
+  it('says nothing for the values it documents', () => {
+    isEnabled('true');
+    isEnabled('false');
+    isEnabled('');
+    expect(core.warning).not.toHaveBeenCalled();
   });
 });
 
@@ -161,5 +177,37 @@ describe('warnIfRunnerUnsupported', () => {
 
     await expect(warnIfRunnerUnsupported()).resolves.toBe(true);
     expect(core.warning).not.toHaveBeenCalled();
+  });
+});
+
+describe('parseMode', () => {
+  it.each(['analyze', 'enforce'])('accepts %p', value => {
+    expect(parseMode(value)).toBe(value);
+  });
+
+  it('falls back to the documented default when empty, which applies monitoring rather than removing it', () => {
+    expect(parseMode('')).toBe('analyze');
+  });
+
+  it("normalises case, because 'Enforce' silently meant analyze while the report said Enforce", () => {
+    // Every mode comparison in the codebase is a strict === 'enforce', so a capitalised value
+    // used to produce analyze behaviour under a summary claiming enforcement.
+    expect(parseMode('Enforce')).toBe('enforce');
+    expect(parseMode('  ANALYZE ')).toBe('analyze');
+  });
+
+  it('rejects anything else rather than quietly picking a mode the caller did not ask for', () => {
+    expect(() => parseMode('enforc')).toThrow(/must be 'analyze' or 'enforce', but was 'enforc'/);
+    expect(() => parseMode('block')).toThrow(/must be 'analyze' or 'enforce'/);
+  });
+});
+
+describe('describeMode', () => {
+  it('normalises for the report so the summary matches what was applied', () => {
+    expect(describeMode('Enforce')).toBe('enforce');
+  });
+
+  it('still renders an invalid mode rather than throwing inside the report', () => {
+    expect(describeMode('nonsense')).toBe('nonsense');
   });
 });

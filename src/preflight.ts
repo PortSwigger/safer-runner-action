@@ -43,7 +43,56 @@ export interface PreflightResult {
  * control because a template variable was empty.
  */
 export function isEnabled(enabledInput: string): boolean {
-  return enabledInput.trim().toLowerCase() !== 'false';
+  const value = enabledInput.trim().toLowerCase();
+
+  if (value !== '' && value !== 'true' && value !== 'false') {
+    // Falling back to enabled is the safe direction, but silence would strand whoever wrote
+    // `enabled: no` on a runner they meant to exclude - and that is the person most likely to
+    // write it, since they are reaching for this input precisely because something is wrong.
+    core.warning(
+      `Safer Runner: 'enabled' must be true or false, but was '${enabledInput.trim()}'. Treating it as true.`
+    );
+  }
+
+  return value !== 'false';
+}
+
+const MODES = ['analyze', 'enforce'] as const;
+export type Mode = (typeof MODES)[number];
+
+/**
+ * Normalise the `mode` input, rejecting anything that is not a mode.
+ *
+ * Case is forgiving because `Enforce` unambiguously means enforce. Until this existed it
+ * produced analyze behaviour - every comparison in the codebase is a strict `=== 'enforce'` -
+ * while the job summary reported the mode as written. That is the worst combination available:
+ * a report claiming a control that was never applied. An unrecognised value throws for the same
+ * reason, rather than falling back to something the caller did not ask for.
+ *
+ * An empty value means the documented default, `analyze`, which is safe: it applies monitoring
+ * rather than removing it. Turning the action off is what `enabled` is for.
+ */
+export function parseMode(raw: string): Mode {
+  const value = raw.trim().toLowerCase();
+
+  if (value === '') {
+    return 'analyze';
+  }
+
+  if ((MODES as readonly string[]).includes(value)) {
+    return value as Mode;
+  }
+
+  throw new Error(`mode must be 'analyze' or 'enforce', but was '${raw.trim()}'`);
+}
+
+/** Non-throwing variant for the report, which still has to render when the mode was invalid. */
+export function describeMode(raw: string): string {
+  try {
+    return parseMode(raw);
+  } catch {
+    return raw.trim();
+  }
 }
 
 /**

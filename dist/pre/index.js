@@ -581,6 +581,8 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.isEnabled = isEnabled;
+exports.parseMode = parseMode;
+exports.describeMode = describeMode;
 exports.hasNoNewPrivs = hasNoNewPrivs;
 exports.hasSystemd = hasSystemd;
 exports.canSudoNonInteractively = canSudoNonInteractively;
@@ -602,7 +604,46 @@ const SYSTEMD_RUNTIME_MARKER = '/run/systemd/system';
  * control because a template variable was empty.
  */
 function isEnabled(enabledInput) {
-    return enabledInput.trim().toLowerCase() !== 'false';
+    const value = enabledInput.trim().toLowerCase();
+    if (value !== '' && value !== 'true' && value !== 'false') {
+        // Falling back to enabled is the safe direction, but silence would strand whoever wrote
+        // `enabled: no` on a runner they meant to exclude - and that is the person most likely to
+        // write it, since they are reaching for this input precisely because something is wrong.
+        core.warning(`Safer Runner: 'enabled' must be true or false, but was '${enabledInput.trim()}'. Treating it as true.`);
+    }
+    return value !== 'false';
+}
+const MODES = ['analyze', 'enforce'];
+/**
+ * Normalise the `mode` input, rejecting anything that is not a mode.
+ *
+ * Case is forgiving because `Enforce` unambiguously means enforce. Until this existed it
+ * produced analyze behaviour - every comparison in the codebase is a strict `=== 'enforce'` -
+ * while the job summary reported the mode as written. That is the worst combination available:
+ * a report claiming a control that was never applied. An unrecognised value throws for the same
+ * reason, rather than falling back to something the caller did not ask for.
+ *
+ * An empty value means the documented default, `analyze`, which is safe: it applies monitoring
+ * rather than removing it. Turning the action off is what `enabled` is for.
+ */
+function parseMode(raw) {
+    const value = raw.trim().toLowerCase();
+    if (value === '') {
+        return 'analyze';
+    }
+    if (MODES.includes(value)) {
+        return value;
+    }
+    throw new Error(`mode must be 'analyze' or 'enforce', but was '${raw.trim()}'`);
+}
+/** Non-throwing variant for the report, which still has to render when the mode was invalid. */
+function describeMode(raw) {
+    try {
+        return parseMode(raw);
+    }
+    catch {
+        return raw.trim();
+    }
 }
 /**
  * True when the kernel has set no_new_privs for this process.

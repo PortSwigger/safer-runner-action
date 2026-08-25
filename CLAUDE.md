@@ -395,6 +395,22 @@ The fail-closed guarantee lives where it always did: `main.ts` calls `core.setFa
 setup throws, so a job that asked for protection cannot finish green without it. The preflight
 only makes the reason legible and saves three `apt-get` attempts on the way.
 
+**Ordering constraint:** `warnIfRunnerUnsupported()` must stay *below* `removeSudoLogging()` in
+`main.ts`. The probe shells out to `sudo -n true`, and `/usr/bin/true` is not in the
+`SAFER_RUNNER_CONFIG` `!log_allowed` alias, so calling it any earlier writes a stray entry to
+`pre-sudo.log` that the report then attributes to another action's pre-hook.
+
+### Input validation (`parseMode()`)
+
+Every mode comparison in the codebase is a strict `=== 'enforce'`, so `mode: Enforce` used to
+produce analyze behaviour while `post.ts` reported the mode as written - a summary claiming a
+control that was never applied. `parseMode()` normalises case and throws on anything that is not
+a mode; `describeMode()` is the non-throwing variant the report uses, since it still has to
+render when the value was invalid.
+
+Empty means `analyze`, the documented default. That is safe - it applies monitoring rather than
+removing it - and turning the action off is what `enabled` is for.
+
 ### Dependency Installation (`installDependencies()`)
 
 `performInitialSetup()` installs `dnsmasq` and `ipset` through `installDependencies()` in

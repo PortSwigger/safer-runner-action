@@ -40,6 +40,7 @@ async function runMain(): Promise<Mocks> {
     // Supported runner unless a test says otherwise; preflight itself is covered in preflight.test.ts
     (preflight.isEnabled as jest.Mock).mockReturnValue(enabled);
     (preflight.warnIfRunnerUnsupported as jest.Mock).mockResolvedValue(runnerSupported);
+    (preflight.parseMode as jest.Mock).mockImplementation(jest.requireActual('./preflight').parseMode);
 
     mocks = { setup, core, preflight };
 
@@ -146,6 +147,25 @@ describe('main.ts gating', () => {
     const { core } = await runMain();
 
     expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('no new privileges'));
+  });
+
+  it('fails the job on a mode it does not recognise, rather than quietly applying analyze', async () => {
+    // Every mode comparison is a strict === 'enforce', so an unvalidated value produced analyze
+    // behaviour under a summary reporting the mode as written.
+    inputs['mode'] = 'Enfroce';
+
+    const { setup, core } = await runMain();
+
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining("must be 'analyze' or 'enforce'"));
+    expect(setup.setupFirewallRules).not.toHaveBeenCalled();
+  });
+
+  it('accepts a capitalised mode and applies it, instead of downgrading to analyze', async () => {
+    inputs['mode'] = 'Enforce';
+
+    const { setup } = await runMain();
+
+    expect(setup.setupDNSMasq).toHaveBeenCalledWith('enforce', ...Array(6).fill(expect.anything()));
   });
 
   it('reports on the runner before touching the host', async () => {

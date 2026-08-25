@@ -12,7 +12,7 @@ import {
 } from './setup';
 import { removeSudoLogging, setupSudoLogging, disableSudoForRunner, applyCustomSudoConfig } from './sudo';
 import { disableDockerForRunner, stopDockerService } from './docker';
-import { isEnabled, warnIfRunnerUnsupported } from './preflight';
+import { isEnabled, parseMode, warnIfRunnerUnsupported } from './preflight';
 
 async function run(): Promise<void> {
   try {
@@ -21,7 +21,7 @@ async function run(): Promise<void> {
       return;
     }
 
-    const mode = core.getInput('mode') || 'analyze';
+    const mode = parseMode(core.getInput('mode'));
     const allowedDomains = core.getInput('allowed-domains') || '';
     const primaryDnsServer = core.getInput('primary-dns-server') || '9.9.9.9';
     const secondaryDnsServer = core.getInput('secondary-dns-server') || '149.112.112.112';
@@ -43,12 +43,15 @@ async function run(): Promise<void> {
       core.warning('⚠️ Both stop-docker and disable-docker are set. stop-docker takes precedence (more restrictive).');
     }
 
-    // Advisory only. Setup below already fails the job if it cannot complete, so these probes
-    // explain the likely reason without being able to fail a pipeline that would have worked.
-    await warnIfRunnerUnsupported();
-
     // Remove sudo logging config from pre-hook to stop capturing in pre-sudo.log
     await removeSudoLogging();
+
+    // Advisory only. Setup below already fails the job if it cannot complete, so these probes
+    // explain the likely reason without being able to fail a pipeline that would have worked.
+    // Deliberately after removeSudoLogging(): the probe shells out to `sudo -n true`, which is
+    // not in the SAFER_RUNNER_CONFIG !log_allowed alias, so running it any earlier would write
+    // a stray entry to pre-sudo.log and show it in the report as another action's sudo usage.
+    await warnIfRunnerUnsupported();
 
     core.info(`🛡️ Starting Safer Runner Action in ${mode} mode`);
     if (mode === 'enforce' && blockRiskySubdomains) {

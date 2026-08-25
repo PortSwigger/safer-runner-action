@@ -77,7 +77,7 @@ steps:
 | Input | Description | Default |
 |-------|-------------|---------|
 | `enabled` | Whether to apply protection at all. Set `false` on runners that cannot support it - see [Platform Support](#platform-support) | `true` |
-| `mode` | `analyze` (log only) or `enforce` (block) | `analyze` |
+| `mode` | `analyze` (log only) or `enforce` (block). Case-insensitive; any other value fails the job | `analyze` |
 | `allowed-domains` | Additional domains to allow | `''` |
 | `primary-dns-server` | Primary DNS server for allowed domains | `9.9.9.9` (Quad9) |
 | `secondary-dns-server` | Secondary DNS server for redundancy | `149.112.112.112` (Quad9) |
