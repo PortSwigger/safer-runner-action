@@ -1060,8 +1060,13 @@ const network_parser_1 = __nccwpck_require__(8089);
 const dns_parser_1 = __nccwpck_require__(1106);
 const sudo_1 = __nccwpck_require__(1279);
 const report_formatter_1 = __nccwpck_require__(5601);
+const preflight_1 = __nccwpck_require__(9999);
 async function run() {
     try {
+        if (!(0, preflight_1.isEnabled)(core.getInput('enabled'))) {
+            core.info('Safer Runner is disabled for this job (enabled: false) - no report to generate.');
+            return;
+        }
         core.info('🔍 Analyzing network access logs...');
         // Whether protection was actually established. Setup failures are non-fatal, so without
         // this the summary would report on a job that ran with no protection as if all were well.
@@ -1200,6 +1205,155 @@ async function generateJobSummary(connections, dnsResolutions, sudoCommands, pre
     await core.summary.addRaw(summary).write();
 }
 run();
+
+
+/***/ }),
+
+/***/ 9999:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Two questions that must be answered before the action touches the host: was protection asked
+ * for, and can this runner actually provide it.
+ *
+ * Both exist because of the same failure. `pre` and `post` have no `pre-if`/`post-if` in
+ * action.yaml, so GitHub defaults them to `always()` and runs them even when the calling
+ * workflow skips the main step. A repository that never opted in still got three `apt-get`
+ * retries and a red "NO network protection" annotation on every build.
+ *
+ * The second question matters more. Safer Runner configures the host: it installs packages,
+ * creates ipsets, rewrites iptables, replaces /etc/resolv.conf and restarts dnsmasq and rsyslog.
+ * That needs real root and a service manager, which a GitHub-hosted runner has. A container
+ * runner does not. Actions Runner Controller pods typically set
+ * `securityContext.allowPrivilegeEscalation: false`, which sets the kernel's no_new_privs bit;
+ * the kernel then ignores the setuid bit on /usr/bin/sudo and every privileged step fails before
+ * sudo has even read sudoers, so no sudoers rule can work around it.
+ *
+ * Detecting that up front converts a slow, misleading failure - retried apt calls followed by a
+ * job that quietly runs unprotected - into an immediate and accurate one.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isEnabled = isEnabled;
+exports.hasNoNewPrivs = hasNoNewPrivs;
+exports.hasSystemd = hasSystemd;
+exports.canSudoNonInteractively = canSudoNonInteractively;
+exports.checkRunnerSupport = checkRunnerSupport;
+exports.assertRunnerSupported = assertRunnerSupported;
+const exec = __importStar(__nccwpck_require__(5236));
+const fs = __importStar(__nccwpck_require__(9896));
+/** Where the kernel reports the no_new_privs bit for the current process. */
+const PROC_SELF_STATUS = '/proc/self/status';
+/** Present only when systemd is the init system. This is the check sd_booted(3) makes. */
+const SYSTEMD_RUNTIME_MARKER = '/run/systemd/system';
+/**
+ * Whether the caller asked for protection at all.
+ *
+ * Deliberately an explicit input rather than an inference from an empty `mode`: a workflow that
+ * passes `mode: ${{ inputs.something-unset }}` should fail loudly, not silently lose its egress
+ * control because a template variable was empty.
+ */
+function isEnabled(enabledInput) {
+    return enabledInput.trim().toLowerCase() !== 'false';
+}
+/**
+ * True when the kernel has set no_new_privs for this process.
+ *
+ * An unreadable /proc is treated as "not set". These checks exist to explain a known failure,
+ * not to invent new reasons to refuse to run on a host that would have worked.
+ */
+function hasNoNewPrivs() {
+    try {
+        return /^NoNewPrivs:\s*1\s*$/m.test(fs.readFileSync(PROC_SELF_STATUS, 'utf8'));
+    }
+    catch {
+        return false;
+    }
+}
+/** True when systemd is running and can be asked to restart dnsmasq and rsyslog. */
+function hasSystemd() {
+    try {
+        return fs.existsSync(SYSTEMD_RUNTIME_MARKER);
+    }
+    catch {
+        return false;
+    }
+}
+/** True when the runner user can reach root without a password prompt. */
+async function canSudoNonInteractively() {
+    try {
+        return (await exec.exec('sudo', ['-n', 'true'], { ignoreReturnCode: true, silent: true })) === 0;
+    }
+    catch {
+        return false;
+    }
+}
+async function checkRunnerSupport() {
+    const reasons = [];
+    if (hasNoNewPrivs()) {
+        reasons.push("the kernel's no_new_privs bit is set, so sudo cannot elevate - on Kubernetes this is what " +
+            'securityContext.allowPrivilegeEscalation: false does');
+    }
+    else if (!(await canSudoNonInteractively())) {
+        // Only worth probing when no_new_privs has not already accounted for the failure.
+        reasons.push('the runner user cannot run sudo without a password');
+    }
+    if (!hasSystemd()) {
+        reasons.push('systemd is not running, so dnsmasq and rsyslog cannot be started or restarted');
+    }
+    return { supported: reasons.length === 0, reasons };
+}
+/**
+ * Throw unless this runner can support the action.
+ *
+ * Callers decide how loud that is: the pre-hook reports it and lets the main step try, while the
+ * main step fails the job. A workflow that asked for protection must never be able to finish
+ * green without it.
+ */
+async function assertRunnerSupported() {
+    const { supported, reasons } = await checkRunnerSupport();
+    if (supported) {
+        return;
+    }
+    throw new Error(`this runner cannot support Safer Runner: ${reasons.join('; ')}. ` +
+        'Safer Runner configures the host, so it needs a GitHub-hosted runner or an equivalent VM ' +
+        'with passwordless sudo and systemd. Container-based self-hosted runners - Actions Runner ' +
+        'Controller pods, Docker executors - cannot provide that. Set enabled: false on those runners.');
+}
 
 
 /***/ }),

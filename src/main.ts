@@ -12,9 +12,15 @@ import {
 } from './setup';
 import { removeSudoLogging, setupSudoLogging, disableSudoForRunner, applyCustomSudoConfig } from './sudo';
 import { disableDockerForRunner, stopDockerService } from './docker';
+import { assertRunnerSupported, isEnabled } from './preflight';
 
 async function run(): Promise<void> {
   try {
+    if (!isEnabled(core.getInput('enabled'))) {
+      core.info('Safer Runner is disabled for this job (enabled: false) - no protection applied.');
+      return;
+    }
+
     const mode = core.getInput('mode') || 'analyze';
     const allowedDomains = core.getInput('allowed-domains') || '';
     const primaryDnsServer = core.getInput('primary-dns-server') || '9.9.9.9';
@@ -36,6 +42,10 @@ async function run(): Promise<void> {
     if (stopDocker && disableDocker) {
       core.warning('⚠️ Both stop-docker and disable-docker are set. stop-docker takes precedence (more restrictive).');
     }
+
+    // A job that asked for protection must not be able to finish green without it, so an
+    // unsupported runner fails here rather than degrading quietly the way the pre-hook does.
+    await assertRunnerSupported();
 
     // Remove sudo logging config from pre-hook to stop capturing in pre-sudo.log
     await removeSudoLogging();

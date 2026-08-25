@@ -76,6 +76,7 @@ steps:
 
 | Input | Description | Default |
 |-------|-------------|---------|
+| `enabled` | Whether to apply protection at all. Set `false` on runners that cannot support it - see [Platform Support](#platform-support) | `true` |
 | `mode` | `analyze` (log only) or `enforce` (block) | `analyze` |
 | `allowed-domains` | Additional domains to allow | `''` |
 | `primary-dns-server` | Primary DNS server for allowed domains | `9.9.9.9` (Quad9) |
@@ -157,8 +158,20 @@ steps:
 ### Platform Support
 
 - **GitHub-hosted runners**: Ubuntu only. Windows and macOS are not supported.
-- **Self-hosted runners**: Ubuntu only, with sudo access and iptables. Other distributions (RHEL, Debian) are not supported.
-- **Containerized jobs**: not supported. The action needs sudo on the runner itself, which a job running in a container does not have.
+- **Self-hosted runners**: Ubuntu only, on a VM with passwordless sudo and systemd.
+- **Container-based runners**: not supported. Actions Runner Controller pods and Docker executors
+  cannot run this action, and no configuration of the action changes that. The blocker is the
+  privilege model: such pods usually set `securityContext.allowPrivilegeEscalation: false`, which
+  sets the kernel's `no_new_privs` bit; the kernel then ignores the setuid bit on `/usr/bin/sudo`,
+  and sudo exits before it has read sudoers, so no sudoers rule helps. There is also no systemd to
+  restart `dnsmasq` and `rsyslog`, and `/etc/resolv.conf` is a bind mount owned by the kubelet.
+
+  The action detects this and stops immediately with the reason. Because GitHub defaults
+  `pre-if` and `post-if` to `always()`, a step-level `if:` does **not** prevent the hooks from
+  running - set `enabled: false` instead.
+
+  Restricting egress on runners you own is better done at the platform layer, where the control
+  sits outside the job and cannot be tampered with by workflow code.
 
 ### Security Limitations
 

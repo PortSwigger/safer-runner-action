@@ -11,9 +11,15 @@ import {
   generateSecurityStatusBanner,
   type SecurityStatus
 } from './formatters/report-formatter';
+import { isEnabled } from './preflight';
 
 async function run(): Promise<void> {
   try {
+    if (!isEnabled(core.getInput('enabled'))) {
+      core.info('Safer Runner is disabled for this job (enabled: false) - no report to generate.');
+      return;
+    }
+
     core.info('🔍 Analyzing network access logs...');
 
     // Whether protection was actually established. Setup failures are non-fatal, so without

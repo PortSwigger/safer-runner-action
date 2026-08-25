@@ -11,6 +11,7 @@ src/
 ├── pre.ts           # Pre-action hook - establishes analyze mode monitoring
 ├── main.ts          # Main action entry point - applies user configuration
 ├── post.ts          # Post-action analysis and reporting
+├── preflight.ts     # Is protection wanted, and can this runner provide it
 ├── setup.ts         # Shared setup functions (DNS, firewall, ipsets)
 ├── sudo.ts          # Sudo logging and configuration management
 ├── docker.ts        # Docker access control (group membership)
@@ -363,6 +364,30 @@ expect(result.config).toContain('server=/example.com/1.0.0.1');
 
 **Disabling secondary DNS**: Pass empty string for `secondaryDnsServer` to use only primary DNS.
 
+### Gating: `enabled` and the runner preflight (`preflight.ts`)
+
+`action.yaml` declares `pre`, `main` and `post` with no `pre-if`/`post-if`, so GitHub defaults
+both to `always()`. A step-level `if:` therefore skips only the **main** step - the hooks still
+run. That is how a repository which never opted in ended up paying for three `apt-get` attempts
+and a red "NO network protection" annotation on every build.
+
+Two gates address it, both checked in `pre.ts`, `main.ts` and `post.ts`:
+
+1. **`isEnabled()`** - the `enabled` input, default `true`. Callers that gate the step must also
+   pass `enabled: false`. It is a distinct input rather than an inference from an empty `mode`
+   on purpose: a workflow passing `mode: ${{ inputs.unset }}` should fail loudly, not silently
+   lose its egress control to an empty template variable.
+
+2. **`assertRunnerSupported()`** - probes `no_new_privs` (`/proc/self/status`), systemd
+   (`/run/systemd/system`, the `sd_booted(3)` check) and passwordless sudo. Every probe fails
+   safe: anything it cannot determine is treated as supported, so it can never refuse a host
+   that would have worked.
+
+The two callers deliberately differ in severity. The pre-hook reports the failure and lets the
+main step try, as it always has. The main step fails the job: a workflow that asked for
+protection must not be able to finish green without it. That silent degradation is exactly what
+let self-hosted jobs run unprotected for five months.
+
 ### Dependency Installation (`installDependencies()`)
 
 `performInitialSetup()` installs `dnsmasq` and `ipset` through `installDependencies()` in
@@ -562,6 +587,8 @@ lines. Without distinct prefixes a substring match would send every line to both
 - `formatters/report-formatter.banner.test.ts` - Security status banner
 - `validation.test.ts` - System integrity validation
 - `docker.test.ts` - Docker access control
+- `preflight.test.ts` - enablement gate and runner capability detection
+- `pre.test.ts` - pre-hook gating (disabled jobs, unsupported runners)
 - `setup.test.ts` - rsyslog iptables log filtering
 - `setup.apt.test.ts` - Hardened dependency installation
 - `setup.firewall.test.ts` - iptables rule generation
