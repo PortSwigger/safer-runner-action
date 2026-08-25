@@ -9,6 +9,7 @@ const inputs: Record<string, string> = {};
 const state: Record<string, string> = {};
 let enabled = true;
 let runnerSupported = true;
+let setupError: Error | null = null;
 
 type Mocks = {
   setup: typeof import('./setup');
@@ -32,12 +33,13 @@ async function runMain(): Promise<Mocks> {
     (core.getBooleanInput as jest.Mock).mockImplementation(() => false);
     (core.getState as jest.Mock).mockImplementation((n: string) => state[n] ?? '');
     (setup.setupDNSMasq as jest.Mock).mockResolvedValue([]);
-    (setup.performInitialSetup as jest.Mock).mockResolvedValue({ username: 'dns-x', uid: 1001 });
+    (setup.performInitialSetup as jest.Mock).mockImplementation(async () => {
+      if (setupError) throw setupError;
+      return { username: 'dns-x', uid: 1001 };
+    });
     // Supported runner unless a test says otherwise; preflight itself is covered in preflight.test.ts
     (preflight.isEnabled as jest.Mock).mockReturnValue(enabled);
-    (preflight.assertRunnerSupported as jest.Mock).mockImplementation(async () => {
-      if (!runnerSupported) throw new Error('this runner cannot support Safer Runner: no_new_privs');
-    });
+    (preflight.warnIfRunnerUnsupported as jest.Mock).mockResolvedValue(runnerSupported);
 
     mocks = { setup, core, preflight };
 
@@ -60,6 +62,7 @@ describe('main.ts wiring', () => {
     state['pre-setup-completed'] = 'true';
     enabled = true;
     runnerSupported = true;
+    setupError = null;
   });
 
   it('gives the firewall the same DNS servers it gives dnsmasq', async () => {
@@ -112,6 +115,7 @@ describe('main.ts gating', () => {
     for (const k of Object.keys(state)) delete state[k];
     enabled = true;
     runnerSupported = true;
+    setupError = null;
   });
 
   it('does nothing at all when the action is disabled for this job', async () => {
@@ -123,20 +127,31 @@ describe('main.ts gating', () => {
     expect(core.setFailed).not.toHaveBeenCalled();
   });
 
-  it('fails the job when protection was asked for but the runner cannot provide it', async () => {
-    // The silent degradation this replaces is what let every self-hosted job run unprotected.
+  it('still attempts setup on a runner the probes dislike, so a false positive cannot break a working pipeline', async () => {
+    // The probes are heuristics about the host. Setup already fails closed - main.ts calls
+    // setFailed when it throws - so reality decides, not the preflight.
     runnerSupported = false;
 
     const { setup, core } = await runMain();
 
-    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('cannot support Safer Runner'));
-    expect(setup.performInitialSetup).not.toHaveBeenCalled();
+    expect(setup.setupFirewallRules).toHaveBeenCalled();
+    expect(core.setFailed).not.toHaveBeenCalled();
   });
 
-  it('checks the runner before touching the host', async () => {
+  it('still fails the job when setup itself cannot complete', async () => {
+    // This is the fail-closed guarantee, and it predates the preflight: a job that asked for
+    // protection cannot finish green without it.
+    setupError = new Error('sudo: no new privileges');
+
+    const { core } = await runMain();
+
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('no new privileges'));
+  });
+
+  it('reports on the runner before touching the host', async () => {
     const { preflight, setup } = await runMain();
 
-    expect(preflight.assertRunnerSupported).toHaveBeenCalled();
+    expect(preflight.warnIfRunnerUnsupported).toHaveBeenCalled();
     expect(setup.setupFirewallRules).toHaveBeenCalled();
   });
 });

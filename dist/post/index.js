@@ -1274,6 +1274,8 @@ exports.hasSystemd = hasSystemd;
 exports.canSudoNonInteractively = canSudoNonInteractively;
 exports.checkRunnerSupport = checkRunnerSupport;
 exports.assertRunnerSupported = assertRunnerSupported;
+exports.warnIfRunnerUnsupported = warnIfRunnerUnsupported;
+const core = __importStar(__nccwpck_require__(7484));
 const exec = __importStar(__nccwpck_require__(5236));
 const fs = __importStar(__nccwpck_require__(9896));
 /** Where the kernel reports the no_new_privs bit for the current process. */
@@ -1337,22 +1339,42 @@ async function checkRunnerSupport() {
     }
     return { supported: reasons.length === 0, reasons };
 }
-/**
- * Throw unless this runner can support the action.
- *
- * Callers decide how loud that is: the pre-hook reports it and lets the main step try, while the
- * main step fails the job. A workflow that asked for protection must never be able to finish
- * green without it.
- */
-async function assertRunnerSupported() {
-    const { supported, reasons } = await checkRunnerSupport();
-    if (supported) {
-        return;
-    }
-    throw new Error(`this runner cannot support Safer Runner: ${reasons.join('; ')}. ` +
+/** The advice appended to both the pre-hook error and the main-step warning. */
+function guidance(reasons) {
+    return (`this runner cannot support Safer Runner: ${reasons.join('; ')}. ` +
         'Safer Runner configures the host, so it needs a GitHub-hosted runner or an equivalent VM ' +
         'with passwordless sudo and systemd. Container-based self-hosted runners - Actions Runner ' +
         'Controller pods, Docker executors - cannot provide that. Set enabled: false on those runners.');
+}
+/**
+ * Throw unless this runner can support the action. Used by the pre-hook only.
+ *
+ * Safe to throw here because the pre-hook is non-fatal by design: the main step still gets its
+ * full attempt, so a wrong answer costs early monitoring rather than the job.
+ */
+async function assertRunnerSupported() {
+    const { supported, reasons } = await checkRunnerSupport();
+    if (!supported) {
+        throw new Error(guidance(reasons));
+    }
+}
+/**
+ * Report an unsupportable runner without deciding the job's fate. Used by the main step.
+ *
+ * These probes must never be the reason a pipeline fails. They are heuristics about the host,
+ * and a false positive - a systemd layout we did not anticipate, say - would break a workflow
+ * that was working perfectly well. Setup already fails closed: main.ts calls core.setFailed when
+ * it throws, and it has done since before this check existed. So the honest division of labour
+ * is for the probes to explain and for the setup attempt to decide.
+ *
+ * @returns whether the runner looks supportable, for callers that want to log it
+ */
+async function warnIfRunnerUnsupported() {
+    const { supported, reasons } = await checkRunnerSupport();
+    if (!supported) {
+        core.warning(`${guidance(reasons)} Attempting setup anyway; it will fail the job if it cannot complete.`);
+    }
+    return supported;
 }
 
 

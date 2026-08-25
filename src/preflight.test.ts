@@ -1,3 +1,4 @@
+import * as core from '@actions/core';
 import * as exec from '@actions/exec';
 import * as fs from 'fs';
 import {
@@ -6,7 +7,8 @@ import {
   checkRunnerSupport,
   hasNoNewPrivs,
   hasSystemd,
-  isEnabled
+  isEnabled,
+  warnIfRunnerUnsupported
 } from './preflight';
 
 jest.mock('@actions/exec');
@@ -143,5 +145,21 @@ describe('assertRunnerSupported', () => {
 
     await expect(assertRunnerSupported()).rejects.toThrow(/cannot support Safer Runner/);
     await expect(assertRunnerSupported()).rejects.toThrow(/enabled: false/);
+  });
+});
+
+describe('warnIfRunnerUnsupported', () => {
+  it('warns without throwing, so a wrong answer cannot fail a job that would have worked', async () => {
+    arcPod();
+
+    await expect(warnIfRunnerUnsupported()).resolves.toBe(false);
+    expect(core.warning).toHaveBeenCalledWith(expect.stringContaining('Attempting setup anyway'));
+  });
+
+  it('says nothing on a supported runner', async () => {
+    githubHosted();
+
+    await expect(warnIfRunnerUnsupported()).resolves.toBe(true);
+    expect(core.warning).not.toHaveBeenCalled();
   });
 });

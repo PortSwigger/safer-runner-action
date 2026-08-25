@@ -378,15 +378,22 @@ Two gates address it, both checked in `pre.ts`, `main.ts` and `post.ts`:
    on purpose: a workflow passing `mode: ${{ inputs.unset }}` should fail loudly, not silently
    lose its egress control to an empty template variable.
 
-2. **`assertRunnerSupported()`** - probes `no_new_privs` (`/proc/self/status`), systemd
+2. **The runner preflight** - probes `no_new_privs` (`/proc/self/status`), systemd
    (`/run/systemd/system`, the `sd_booted(3)` check) and passwordless sudo. Every probe fails
    safe: anything it cannot determine is treated as supported, so it can never refuse a host
    that would have worked.
 
-The two callers deliberately differ in severity. The pre-hook reports the failure and lets the
-main step try, as it always has. The main step fails the job: a workflow that asked for
-protection must not be able to finish green without it. That silent degradation is exactly what
-let self-hosted jobs run unprotected for five months.
+**The preflight must never be the thing that fails a job.** These are heuristics about the host,
+and a false positive would break a pipeline that was working. So the two callers differ:
+
+| Caller | Function | On an unsupportable runner |
+|---|---|---|
+| `pre.ts` | `assertRunnerSupported()` | throws; the hook is non-fatal by design, so the main step still gets its full attempt |
+| `main.ts` | `warnIfRunnerUnsupported()` | warns and continues; setup itself decides |
+
+The fail-closed guarantee lives where it always did: `main.ts` calls `core.setFailed()` when
+setup throws, so a job that asked for protection cannot finish green without it. The preflight
+only makes the reason legible and saves three `apt-get` attempts on the way.
 
 ### Dependency Installation (`installDependencies()`)
 

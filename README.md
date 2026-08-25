@@ -166,9 +166,9 @@ steps:
   and sudo exits before it has read sudoers, so no sudoers rule helps. There is also no systemd to
   restart `dnsmasq` and `rsyslog`, and `/etc/resolv.conf` is a bind mount owned by the kubelet.
 
-  The action detects this and stops immediately with the reason. Because GitHub defaults
-  `pre-if` and `post-if` to `always()`, a step-level `if:` does **not** prevent the hooks from
-  running - set `enabled: false` instead.
+  The action detects this and says so, rather than retrying `apt-get` and then running the job
+  unprotected. Because GitHub defaults `pre-if` and `post-if` to `always()`, a step-level `if:`
+  does **not** prevent the hooks from running - set `enabled: false` instead.
 
   Restricting egress on runners you own is better done at the platform layer, where the control
   sits outside the job and cannot be tampered with by workflow code.
