@@ -11,6 +11,7 @@ src/
 ├── pre.ts           # Pre-action hook - establishes analyze mode monitoring
 ├── main.ts          # Main action entry point - applies user configuration
 ├── post.ts          # Post-action analysis and reporting
+├── preflight.ts     # Is protection wanted, and can this runner provide it
 ├── setup.ts         # Shared setup functions (DNS, firewall, ipsets)
 ├── sudo.ts          # Sudo logging and configuration management
 ├── docker.ts        # Docker access control (group membership)
@@ -363,6 +364,53 @@ expect(result.config).toContain('server=/example.com/1.0.0.1');
 
 **Disabling secondary DNS**: Pass empty string for `secondaryDnsServer` to use only primary DNS.
 
+### Gating: `enabled` and the runner preflight (`preflight.ts`)
+
+`action.yaml` declares `pre`, `main` and `post` with no `pre-if`/`post-if`, so GitHub defaults
+both to `always()`. A step-level `if:` therefore skips only the **main** step - the hooks still
+run. That is how a repository which never opted in ended up paying for three `apt-get` attempts
+and a red "NO network protection" annotation on every build.
+
+Two gates address it, both checked in `pre.ts`, `main.ts` and `post.ts`:
+
+1. **`isEnabled()`** - the `enabled` input, default `true`. Callers that gate the step must also
+   pass `enabled: false`. It is a distinct input rather than an inference from an empty `mode`
+   on purpose: a workflow passing `mode: ${{ inputs.unset }}` should fail loudly, not silently
+   lose its egress control to an empty template variable.
+
+2. **The runner preflight** - probes `no_new_privs` (`/proc/self/status`), systemd
+   (`/run/systemd/system`, the `sd_booted(3)` check) and passwordless sudo. Every probe fails
+   safe: anything it cannot determine is treated as supported, so it can never refuse a host
+   that would have worked.
+
+**The preflight must never be the thing that fails a job.** These are heuristics about the host,
+and a false positive would break a pipeline that was working. So the two callers differ:
+
+| Caller | Function | On an unsupportable runner |
+|---|---|---|
+| `pre.ts` | `assertRunnerSupported()` | throws; the hook is non-fatal by design, so the main step still gets its full attempt |
+| `main.ts` | `warnIfRunnerUnsupported()` | warns and continues; setup itself decides |
+
+The fail-closed guarantee lives where it always did: `main.ts` calls `core.setFailed()` when
+setup throws, so a job that asked for protection cannot finish green without it. The preflight
+only makes the reason legible and saves three `apt-get` attempts on the way.
+
+**Ordering constraint:** `warnIfRunnerUnsupported()` must stay *below* `removeSudoLogging()` in
+`main.ts`. The probe shells out to `sudo -n true`, and `/usr/bin/true` is not in the
+`SAFER_RUNNER_CONFIG` `!log_allowed` alias, so calling it any earlier writes a stray entry to
+`pre-sudo.log` that the report then attributes to another action's pre-hook.
+
+### Input validation (`parseMode()`)
+
+Every mode comparison in the codebase is a strict `=== 'enforce'`, so `mode: Enforce` used to
+produce analyze behaviour while `post.ts` reported the mode as written - a summary claiming a
+control that was never applied. `parseMode()` normalises case and throws on anything that is not
+a mode; `describeMode()` is the non-throwing variant the report uses, since it still has to
+render when the value was invalid.
+
+Empty means `analyze`, the documented default. That is safe - it applies monitoring rather than
+removing it - and turning the action off is what `enabled` is for.
+
 ### Dependency Installation (`installDependencies()`)
 
 `performInitialSetup()` installs `dnsmasq` and `ipset` through `installDependencies()` in
@@ -562,6 +610,8 @@ lines. Without distinct prefixes a substring match would send every line to both
 - `formatters/report-formatter.banner.test.ts` - Security status banner
 - `validation.test.ts` - System integrity validation
 - `docker.test.ts` - Docker access control
+- `preflight.test.ts` - enablement gate and runner capability detection
+- `pre.test.ts` - pre-hook gating (disabled jobs, unsupported runners)
 - `setup.test.ts` - rsyslog iptables log filtering
 - `setup.apt.test.ts` - Hardened dependency installation
 - `setup.firewall.test.ts` - iptables rule generation

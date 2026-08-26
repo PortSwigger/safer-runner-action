@@ -3,13 +3,18 @@ jest.mock('./setup');
 jest.mock('./sudo');
 jest.mock('./docker');
 jest.mock('./validation');
+jest.mock('./preflight');
 
 const inputs: Record<string, string> = {};
 const state: Record<string, string> = {};
+let enabled = true;
+let runnerSupported = true;
+let setupError: Error | null = null;
 
 type Mocks = {
   setup: typeof import('./setup');
   core: typeof import('@actions/core');
+  preflight: typeof import('./preflight');
 };
 
 /**
@@ -22,14 +27,22 @@ async function runMain(): Promise<Mocks> {
   await jest.isolateModulesAsync(async () => {
     const core = await import('@actions/core');
     const setup = await import('./setup');
+    const preflight = await import('./preflight');
 
     (core.getInput as jest.Mock).mockImplementation((n: string) => inputs[n] ?? '');
     (core.getBooleanInput as jest.Mock).mockImplementation(() => false);
     (core.getState as jest.Mock).mockImplementation((n: string) => state[n] ?? '');
     (setup.setupDNSMasq as jest.Mock).mockResolvedValue([]);
-    (setup.performInitialSetup as jest.Mock).mockResolvedValue({ username: 'dns-x', uid: 1001 });
+    (setup.performInitialSetup as jest.Mock).mockImplementation(async () => {
+      if (setupError) throw setupError;
+      return { username: 'dns-x', uid: 1001 };
+    });
+    // Supported runner unless a test says otherwise; preflight itself is covered in preflight.test.ts
+    (preflight.isEnabled as jest.Mock).mockReturnValue(enabled);
+    (preflight.warnIfRunnerUnsupported as jest.Mock).mockResolvedValue(runnerSupported);
+    (preflight.parseMode as jest.Mock).mockImplementation(jest.requireActual('./preflight').parseMode);
 
-    mocks = { setup, core };
+    mocks = { setup, core, preflight };
 
     await import('./main');
     // let the top-level async run() settle
@@ -48,6 +61,9 @@ describe('main.ts wiring', () => {
     state['dns-user'] = 'dns-x';
     state['dns-uid'] = '1001';
     state['pre-setup-completed'] = 'true';
+    enabled = true;
+    runnerSupported = true;
+    setupError = null;
   });
 
   it('gives the firewall the same DNS servers it gives dnsmasq', async () => {
@@ -91,5 +107,71 @@ describe('main.ts wiring', () => {
 
     expect(core.saveState).toHaveBeenCalledWith('main-setup-completed', 'true');
     expect(core.setFailed).not.toHaveBeenCalled();
+  });
+});
+
+describe('main.ts gating', () => {
+  beforeEach(() => {
+    for (const k of Object.keys(inputs)) delete inputs[k];
+    for (const k of Object.keys(state)) delete state[k];
+    enabled = true;
+    runnerSupported = true;
+    setupError = null;
+  });
+
+  it('does nothing at all when the action is disabled for this job', async () => {
+    enabled = false;
+
+    const { setup, core } = await runMain();
+
+    expect(setup.performInitialSetup).not.toHaveBeenCalled();
+    expect(core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('still attempts setup on a runner the probes dislike, so a false positive cannot break a working pipeline', async () => {
+    // The probes are heuristics about the host. Setup already fails closed - main.ts calls
+    // setFailed when it throws - so reality decides, not the preflight.
+    runnerSupported = false;
+
+    const { setup, core } = await runMain();
+
+    expect(setup.setupFirewallRules).toHaveBeenCalled();
+    expect(core.setFailed).not.toHaveBeenCalled();
+  });
+
+  it('still fails the job when setup itself cannot complete', async () => {
+    // This is the fail-closed guarantee, and it predates the preflight: a job that asked for
+    // protection cannot finish green without it.
+    setupError = new Error('sudo: no new privileges');
+
+    const { core } = await runMain();
+
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining('no new privileges'));
+  });
+
+  it('fails the job on a mode it does not recognise, rather than quietly applying analyze', async () => {
+    // Every mode comparison is a strict === 'enforce', so an unvalidated value produced analyze
+    // behaviour under a summary reporting the mode as written.
+    inputs['mode'] = 'Enfroce';
+
+    const { setup, core } = await runMain();
+
+    expect(core.setFailed).toHaveBeenCalledWith(expect.stringContaining("must be 'analyze' or 'enforce'"));
+    expect(setup.setupFirewallRules).not.toHaveBeenCalled();
+  });
+
+  it('accepts a capitalised mode and applies it, instead of downgrading to analyze', async () => {
+    inputs['mode'] = 'Enforce';
+
+    const { setup } = await runMain();
+
+    expect(setup.setupDNSMasq).toHaveBeenCalledWith('enforce', ...Array(6).fill(expect.anything()));
+  });
+
+  it('reports on the runner before touching the host', async () => {
+    const { preflight, setup } = await runMain();
+
+    expect(preflight.warnIfRunnerUnsupported).toHaveBeenCalled();
+    expect(setup.setupFirewallRules).toHaveBeenCalled();
   });
 });

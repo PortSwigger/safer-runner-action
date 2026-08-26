@@ -11,9 +11,15 @@ import {
   generateSecurityStatusBanner,
   type SecurityStatus
 } from './formatters/report-formatter';
+import { describeMode, isEnabled } from './preflight';
 
 async function run(): Promise<void> {
   try {
+    if (!isEnabled(core.getInput('enabled'))) {
+      core.info('Safer Runner is disabled for this job (enabled: false) - no report to generate.');
+      return;
+    }
+
     core.info('🔍 Analyzing network access logs...');
 
     // Whether protection was actually established. Setup failures are non-fatal, so without
@@ -21,7 +27,7 @@ async function run(): Promise<void> {
     const securityStatus: SecurityStatus = {
       preSetupCompleted: core.getState('pre-setup-completed') === 'true',
       mainSetupCompleted: core.getState('main-setup-completed') === 'true',
-      mode: core.getInput('mode') || 'analyze',
+      mode: describeMode(core.getInput('mode')),
       preSetupError: core.getState('pre-setup-error') || undefined
     };
 
@@ -153,7 +159,7 @@ async function generateJobSummary(
   validationReport: string,
   securityStatus: SecurityStatus
 ): Promise<void> {
-  const mode = core.getInput('mode') || 'analyze';
+  const mode = describeMode(core.getInput('mode'));
   const blockRiskySubdomains = core.getBooleanInput('block-risky-github-subdomains');
   const jobName = process.env.GITHUB_JOB || 'unknown';
 

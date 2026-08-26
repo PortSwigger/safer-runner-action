@@ -6,6 +6,10 @@ branding:
   color: 'red'
 
 inputs:
+  enabled:
+    description: 'Whether to apply protection at all. Set to "false" on runners that cannot support it, such as container-based self-hosted runners. A step-level `if:` does NOT stop this action, because GitHub defaults pre-if and post-if to always() - use this input instead.'
+    required: false
+    default: 'true'
   mode:
     description: 'Operation mode: "analyze" to log traffic without blocking, "enforce" to block unauthorized domains'
     required: false

@@ -11,6 +11,7 @@ import {
   setupIptablesLogging
 } from './setup';
 import { applyCustomSudoConfig } from './sudo';
+import { assertRunnerSupported, isEnabled } from './preflight';
 
 /**
  * Pre-action hook: Establish security in analyze mode
@@ -24,7 +25,19 @@ import { applyCustomSudoConfig } from './sudo';
  */
 async function run(): Promise<void> {
   try {
+    if (!isEnabled(core.getInput('enabled'))) {
+      // These hooks run even when the workflow skips the main step, because action.yaml has no
+      // pre-if. Returning here is what keeps a repository that never opted in free of apt calls
+      // and of the post-hook's "no protection" banner.
+      core.info('Safer Runner is disabled for this job (enabled: false) - skipping pre-hook setup.');
+      return;
+    }
+
     core.info('🔍 Pre-action: Establishing security monitoring...');
+
+    // Nothing below this line works without root and systemd. Failing here gives a reason,
+    // where carrying on gives three apt retries and a job that runs unprotected anyway.
+    await assertRunnerSupported();
 
     // Perform initial system setup
     const dnsUser = await performInitialSetup();

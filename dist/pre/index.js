@@ -446,6 +446,7 @@ Object.defineProperty(exports, "__esModule", ({ value: true }));
 const core = __importStar(__nccwpck_require__(7484));
 const setup_1 = __nccwpck_require__(1413);
 const sudo_1 = __nccwpck_require__(1279);
+const preflight_1 = __nccwpck_require__(9999);
 /**
  * Pre-action hook: Establish security in analyze mode
  *
@@ -458,7 +459,17 @@ const sudo_1 = __nccwpck_require__(1279);
  */
 async function run() {
     try {
+        if (!(0, preflight_1.isEnabled)(core.getInput('enabled'))) {
+            // These hooks run even when the workflow skips the main step, because action.yaml has no
+            // pre-if. Returning here is what keeps a repository that never opted in free of apt calls
+            // and of the post-hook's "no protection" banner.
+            core.info('Safer Runner is disabled for this job (enabled: false) - skipping pre-hook setup.');
+            return;
+        }
         core.info('🔍 Pre-action: Establishing security monitoring...');
+        // Nothing below this line works without root and systemd. Failing here gives a reason,
+        // where carrying on gives three apt retries and a job that runs unprotected anyway.
+        await (0, preflight_1.assertRunnerSupported)();
         // Perform initial system setup
         const dnsUser = await (0, setup_1.performInitialSetup)();
         // Save DNS user info for main action to use
@@ -506,6 +517,218 @@ async function run() {
     }
 }
 run();
+
+
+/***/ }),
+
+/***/ 9999:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+/**
+ * Two questions that must be answered before the action touches the host: was protection asked
+ * for, and can this runner actually provide it.
+ *
+ * Both exist because of the same failure. `pre` and `post` have no `pre-if`/`post-if` in
+ * action.yaml, so GitHub defaults them to `always()` and runs them even when the calling
+ * workflow skips the main step. A repository that never opted in still got three `apt-get`
+ * retries and a red "NO network protection" annotation on every build.
+ *
+ * The second question matters more. Safer Runner configures the host: it installs packages,
+ * creates ipsets, rewrites iptables, replaces /etc/resolv.conf and restarts dnsmasq and rsyslog.
+ * That needs real root and a service manager, which a GitHub-hosted runner has. A container
+ * runner does not. Actions Runner Controller pods typically set
+ * `securityContext.allowPrivilegeEscalation: false`, which sets the kernel's no_new_privs bit;
+ * the kernel then ignores the setuid bit on /usr/bin/sudo and every privileged step fails before
+ * sudo has even read sudoers, so no sudoers rule can work around it.
+ *
+ * Detecting that up front converts a slow, misleading failure - retried apt calls followed by a
+ * job that quietly runs unprotected - into an immediate and accurate one.
+ */
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.isEnabled = isEnabled;
+exports.parseMode = parseMode;
+exports.describeMode = describeMode;
+exports.hasNoNewPrivs = hasNoNewPrivs;
+exports.hasSystemd = hasSystemd;
+exports.canSudoNonInteractively = canSudoNonInteractively;
+exports.checkRunnerSupport = checkRunnerSupport;
+exports.assertRunnerSupported = assertRunnerSupported;
+exports.warnIfRunnerUnsupported = warnIfRunnerUnsupported;
+const core = __importStar(__nccwpck_require__(7484));
+const exec = __importStar(__nccwpck_require__(5236));
+const fs = __importStar(__nccwpck_require__(9896));
+/** Where the kernel reports the no_new_privs bit for the current process. */
+const PROC_SELF_STATUS = '/proc/self/status';
+/** Present only when systemd is the init system. This is the check sd_booted(3) makes. */
+const SYSTEMD_RUNTIME_MARKER = '/run/systemd/system';
+/**
+ * Whether the caller asked for protection at all.
+ *
+ * Deliberately an explicit input rather than an inference from an empty `mode`: a workflow that
+ * passes `mode: ${{ inputs.something-unset }}` should fail loudly, not silently lose its egress
+ * control because a template variable was empty.
+ */
+function isEnabled(enabledInput) {
+    const value = enabledInput.trim().toLowerCase();
+    if (value !== '' && value !== 'true' && value !== 'false') {
+        // Falling back to enabled is the safe direction, but silence would strand whoever wrote
+        // `enabled: no` on a runner they meant to exclude - and that is the person most likely to
+        // write it, since they are reaching for this input precisely because something is wrong.
+        core.warning(`Safer Runner: 'enabled' must be true or false, but was '${enabledInput.trim()}'. Treating it as true.`);
+    }
+    return value !== 'false';
+}
+const MODES = ['analyze', 'enforce'];
+/**
+ * Normalise the `mode` input, rejecting anything that is not a mode.
+ *
+ * Case is forgiving because `Enforce` unambiguously means enforce. Until this existed it
+ * produced analyze behaviour - every comparison in the codebase is a strict `=== 'enforce'` -
+ * while the job summary reported the mode as written. That is the worst combination available:
+ * a report claiming a control that was never applied. An unrecognised value throws for the same
+ * reason, rather than falling back to something the caller did not ask for.
+ *
+ * An empty value means the documented default, `analyze`, which is safe: it applies monitoring
+ * rather than removing it. Turning the action off is what `enabled` is for.
+ */
+function parseMode(raw) {
+    const value = raw.trim().toLowerCase();
+    if (value === '') {
+        return 'analyze';
+    }
+    if (MODES.includes(value)) {
+        return value;
+    }
+    throw new Error(`mode must be 'analyze' or 'enforce', but was '${raw.trim()}'`);
+}
+/** Non-throwing variant for the report, which still has to render when the mode was invalid. */
+function describeMode(raw) {
+    try {
+        return parseMode(raw);
+    }
+    catch {
+        return raw.trim();
+    }
+}
+/**
+ * True when the kernel has set no_new_privs for this process.
+ *
+ * An unreadable /proc is treated as "not set". These checks exist to explain a known failure,
+ * not to invent new reasons to refuse to run on a host that would have worked.
+ */
+function hasNoNewPrivs() {
+    try {
+        return /^NoNewPrivs:\s*1\s*$/m.test(fs.readFileSync(PROC_SELF_STATUS, 'utf8'));
+    }
+    catch {
+        return false;
+    }
+}
+/** True when systemd is running and can be asked to restart dnsmasq and rsyslog. */
+function hasSystemd() {
+    try {
+        return fs.existsSync(SYSTEMD_RUNTIME_MARKER);
+    }
+    catch {
+        return false;
+    }
+}
+/** True when the runner user can reach root without a password prompt. */
+async function canSudoNonInteractively() {
+    try {
+        return (await exec.exec('sudo', ['-n', 'true'], { ignoreReturnCode: true, silent: true })) === 0;
+    }
+    catch {
+        return false;
+    }
+}
+async function checkRunnerSupport() {
+    const reasons = [];
+    if (hasNoNewPrivs()) {
+        reasons.push("the kernel's no_new_privs bit is set, so sudo cannot elevate - on Kubernetes this is what " +
+            'securityContext.allowPrivilegeEscalation: false does');
+    }
+    else if (!(await canSudoNonInteractively())) {
+        // Only worth probing when no_new_privs has not already accounted for the failure.
+        reasons.push('the runner user cannot run sudo without a password');
+    }
+    if (!hasSystemd()) {
+        reasons.push('systemd is not running, so dnsmasq and rsyslog cannot be started or restarted');
+    }
+    return { supported: reasons.length === 0, reasons };
+}
+/** The advice appended to both the pre-hook error and the main-step warning. */
+function guidance(reasons) {
+    return (`this runner cannot support Safer Runner: ${reasons.join('; ')}. ` +
+        'Safer Runner configures the host, so it needs a GitHub-hosted runner or an equivalent VM ' +
+        'with passwordless sudo and systemd. Container-based self-hosted runners - Actions Runner ' +
+        'Controller pods, Docker executors - cannot provide that. Set enabled: false on those runners.');
+}
+/**
+ * Throw unless this runner can support the action. Used by the pre-hook only.
+ *
+ * Safe to throw here because the pre-hook is non-fatal by design: the main step still gets its
+ * full attempt, so a wrong answer costs early monitoring rather than the job.
+ */
+async function assertRunnerSupported() {
+    const { supported, reasons } = await checkRunnerSupport();
+    if (!supported) {
+        throw new Error(guidance(reasons));
+    }
+}
+/**
+ * Report an unsupportable runner without deciding the job's fate. Used by the main step.
+ *
+ * These probes must never be the reason a pipeline fails. They are heuristics about the host,
+ * and a false positive - a systemd layout we did not anticipate, say - would break a workflow
+ * that was working perfectly well. Setup already fails closed: main.ts calls core.setFailed when
+ * it throws, and it has done since before this check existed. So the honest division of labour
+ * is for the probes to explain and for the setup attempt to decide.
+ *
+ * @returns whether the runner looks supportable, for callers that want to log it
+ */
+async function warnIfRunnerUnsupported() {
+    const { supported, reasons } = await checkRunnerSupport();
+    if (!supported) {
+        core.warning(`${guidance(reasons)} Attempting setup anyway; it will fail the job if it cannot complete.`);
+    }
+    return supported;
+}
 
 
 /***/ }),
