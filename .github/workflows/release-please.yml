@@ -1,0 +1,46 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@5c625bfb5d1ff62eadeeb3772007f7f66fdcf071 # v4.4.1
+        id: release
+        with:
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+      # Consumers pin `@v1`, and the action's own configuration advice emits it, so the floating
+      # major and minor tags have to follow every release or that advice goes stale.
+      #
+      # Checked out at the released SHA rather than main's tip: if another commit lands while the
+      # release is running, tagging HEAD would move v1 onto a commit that was never released.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.release.outputs.release_created
+        with:
+          ref: ${{ steps.release.outputs.sha }}
+          fetch-depth: 0
+
+      - name: Move floating major and minor tags
+        if: steps.release.outputs.release_created
+        env:
+          MAJOR: ${{ steps.release.outputs.major }}
+          MINOR: ${{ steps.release.outputs.minor }}
+          TAG: ${{ steps.release.outputs.tag_name }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # Annotated, unlike the hand-made lightweight tags this replaces, so the tag records
+          # who moved it and when.
+          git tag -fa "v${MAJOR}" -m "Release v${MAJOR} (${TAG})"
+          git tag -fa "v${MAJOR}.${MINOR}" -m "Release v${MAJOR}.${MINOR} (${TAG})"
+          git push -f origin "v${MAJOR}" "v${MAJOR}.${MINOR}"

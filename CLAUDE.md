@@ -162,6 +162,34 @@ The `post.ts` generates a comprehensive job summary with:
 6. **Test on a runner** - there is no CI, so push to a branch and reference it from a workflow
    in another repository (`uses: PortSwigger/safer-runner-action@<sha>`)
 
+### Cutting a Release
+
+Releases are driven by [release-please](https://github.com/googleapis/release-please) from
+conventional commit messages, matching the pattern used in `portswigger-apps/shared-workflows`.
+
+1. Land work on `main` with a conventional subject. `fix:` gives a patch, `feat:` a minor, and a
+   `!` or a `BREAKING CHANGE:` footer a major. **A commit without one of these prefixes produces
+   no release**, which is the most common reason an expected release does not appear.
+2. release-please keeps a release pull request open with the version bump and the `CHANGELOG.md`
+   entry. Review it as normal.
+3. Merging that pull request creates the `vX.Y.Z` tag and the GitHub Release, then moves the
+   floating `vX` and `vX.Y` tags onto the released commit.
+
+To release a specific version regardless of the commits, put `Release-As: 1.4.0` in a commit
+message footer.
+
+Two consequences of the branch protection on `main` worth knowing:
+
+- The release pull request needs a human approval, because `GITHUB_TOKEN` cannot approve its own
+  pull request. Every release therefore has a code owner in the loop.
+- CI does not run on the release pull request, because pull requests opened by `GITHUB_TOKEN` do
+  not trigger `pull_request` workflows. This is safe: release pull requests only touch
+  `CHANGELOG.md` and `.release-please-manifest.json`, never `src/` or `dist/`.
+
+`package.json` carries `"version": "1.0.0"` and is not the source of truth for the released
+version; `.release-please-manifest.json` is. Nothing reads the `package.json` version, since
+GitHub Actions resolves the action from `action.yaml`.
+
 ### Adding New Security Features
 
 1. **DNS filtering** - Modify `config/dns-config-builder.ts`
@@ -252,11 +280,30 @@ sudo ipset list user
 
 ## 🧪 Testing Strategy
 
-### Build status: there is no CI
+### CI (`.github/workflows/ci.yml`)
 
-This repository runs no workflows. `npm test` covers the parsers, formatters, config builders
-and rule generation, but nothing exercises the action on a runner, so DNS filtering and firewall
-enforcement are only ever verified by hand.
+Runs on every pull request to `main` and every push to `main`:
+
+| Step | Command |
+|---|---|
+| Unit tests | `npm test` |
+| Types | `npx tsc --noEmit` |
+| Formatting | `npx prettier --check "src/**/*.ts"` |
+| `dist/` is current | rebuild, then `git diff --exit-code -- dist/` |
+
+The `dist/` check is the one that matters most. `dist/` is committed and is what actually runs on
+a runner, with sudo, before any workflow step, so a stale bundle ships code nobody reviewed and
+nothing else in the repository would notice. When it fails, run `npm run package` and commit
+`dist/`.
+
+`ncc` output is fixed by the version pinned in `package-lock.json` rather than by the Node
+version (verified byte-identical on Node 20, 24 and 26), so the comparison does not flake on a
+contributor's toolchain.
+
+### Build status: no runner-level testing
+
+CI covers the parsers, formatters, config builders and rule generation. Nothing exercises the
+action on a runner, so DNS filtering and firewall enforcement are still only verified by hand.
 
 An integration suite covering analyze mode, enforce mode, GitHub Actions compatibility, edge
 cases (localhost, direct IPs, CNAME chains) and system integrity did exist. It was removed in
